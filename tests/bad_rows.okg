@@ -1,0 +1,12 @@
+effect Pay { charge(user: u8[:], cents: i64) -> bool; }
+effect Log { log(line: u8[:]); }
+effect Stock { reserve(item: u8[:]) -> bool; }
+effects Payments = Pay + Log;
+effects Shop = Payments + Stock;
+
+fn pay<C>(cx: C& / Payments, user: u8[:]) -> bool {
+    let r = cx.reserve("book");          // Stock is not in Payments
+    return charge(cx, user, 10);
+}
+fn checkout<C>(cx: C& / Shop, user: u8[:]) -> bool { pay(cx, user) }
+fn audit<C>(cx: C& / Payments) { let ok = checkout(cx, "x"); }   // checkout needs Stock too

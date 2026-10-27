@@ -1,0 +1,2 @@
+tests/bad_rows.okg:8: error: `pay` (effects Payments) calls `reserve` of Stock, which Payments does not have
+tests/bad_rows.okg:12: error: `audit` (effects Payments) calls `checkout` (effects Shop), which needs Stock

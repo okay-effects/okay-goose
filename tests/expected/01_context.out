@@ -1,0 +1,12 @@
+test log: paid
+true told 1
+bank log: paid
+bank log: declined
+true false balance 200
+bank log: refused by the limit
+bank log: declined
+bank log: paid
+false true balance 9950
+strict log: paid
+first: true
+session: false -1

@@ -1,0 +1,55 @@
+// The shop on okay-goose: effects declared, a function's effects checked, a wrapper's operations forwarded.
+
+effect Pay {
+    charge(user: u8[:], cents: i64) -> bool;
+    refund(id: i64);
+}
+effect Log {
+    log(line: u8[:]);
+}
+effect Stock {
+    reserve(item: u8[:]) -> bool;
+}
+effects Payments = Pay + Log;
+effects Shop = Payments + Stock;
+
+struct Receipt { paid: bool, cents: i64 }
+
+// what it may ask of its context: Payments, and no more
+fn pay<C>(cx: C& / Payments, user: u8[:], cents: i64) -> Receipt {
+    let ok = charge(cx, user, cents);
+    if ok { log(cx, "paid"); } else { log(cx, "declined"); }
+    return Receipt { paid: ok, cents: cents };
+}
+
+fn checkout<C>(cx: C& / Shop, user: u8[:], item: u8[:], cents: i64) -> Receipt {
+    if !cx.reserve(item) {
+        log(cx, "out of stock");
+        return Receipt { paid: false, cents: 0 };
+    }
+    return pay(cx, user, cents);
+}
+
+// a test context
+struct Test { approve: bool, stock: i64, lines: i64 }
+fn charge(cx: Test&, user: u8[:], cents: i64) -> bool { cx.approve }
+fn refund(cx: Test&, id: i64) { }
+fn log(cx: Test&, line: u8[:]) { cx.lines += 1; print("  log: ", line); }
+fn reserve(cx: Test&, item: u8[:]) -> bool { if cx.stock > 0 { cx.stock -= 1; true } else { false } }
+
+// an interceptor: a limit on charges, the rest of Shop passed on to `inner`
+struct Limited<H> { inner: H, limit: i64 }
+fn charge<H>(cx: Limited<H>&, user: u8[:], cents: i64) -> bool {
+    if cents > cx.limit { log(cx.inner, "over the limit"); return false; }
+    return charge(cx.inner, user, cents);
+}
+forward Limited<H> to inner for Shop except charge;
+
+fn main() {
+    var t = Test { approve: true, stock: 1, lines: 0 };
+    print(checkout(t, "bob", "book", 100));
+    print(checkout(t, "bob", "book", 100));
+    var l = Limited<Test> { inner: Test { approve: true, stock: 5, lines: 0 }, limit: 1000 };
+    print(checkout(l, "eve", "pen", 5000));
+    print(checkout(l, "eve", "pen", 50), " lines ", l.inner.lines);
+}

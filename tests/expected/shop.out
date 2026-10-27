@@ -1,0 +1,9 @@
+  log: paid
+Receipt { true, 100 }
+  log: out of stock
+Receipt { false, 0 }
+  log: over the limit
+  log: declined
+Receipt { false, 5000 }
+  log: paid
+Receipt { true, 50 } lines 3

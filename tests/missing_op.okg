@@ -1,0 +1,6 @@
+effect Pay { charge(user: u8[:], cents: i64) -> bool; refund(id: i64); }
+effects Payments = Pay;
+fn pay<C>(cx: C& / Payments) -> bool { charge(cx, "a", 1) }
+struct NoRefund { }
+fn charge(cx: NoRefund&, user: u8[:], cents: i64) -> bool { true }
+fn main() { var n = NoRefund { }; print(pay(n)); }
