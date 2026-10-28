@@ -1,0 +1,4 @@
+tests/bad_resumable.okg:3: error: `among` keeps the rest of the program (Choose is not tail): it is called in a resumable fn
+tests/bad_resumable.okg:6: error: `among` inside a block of an expression: a resumable fn stops there only as a statement of it
+tests/bad_resumable.okg:11: error: `half` in a resumable fn: its variables are the frame's fields — give it a type (`let half: T = …`)
+tests/bad_resumable.okg:18: error: `a` declared twice in a resumable fn: its variables are the frame's fields, one name each

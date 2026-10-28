@@ -1,4 +1,4 @@
-// A machine fn: the program stops at each choice, its rest a value — resumed for every alternative (all paths),
+// A resumable fn: the program stops at each choice, its rest a value — resumed for every alternative (all paths),
 // and written out as bytes, to be resumed from them.
 
 effect Choose: many { among(n: i64) -> i64; }
@@ -7,7 +7,7 @@ effect Log { log(line: u8[:]); }
 let A: i64[3] = [1, 2, 3];
 let B: i64[2] = [10, 20];
 
-machine fn pick(base: i64) -> i64 ! Choose + Log {
+resumable fn pick(base: i64) -> i64 ! Choose + Log {
     let a = among(3);
     log("first chosen");
     let b = among(2);

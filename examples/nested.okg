@@ -1,4 +1,4 @@
-// A machine fn calling machine fns: the callee's steps passed out as the caller's, its rest kept in the caller's
+// A resumable fn calling resumable fns: the callee's steps passed out as the caller's, its rest kept in the caller's
 // frame; its value bound when it is done.
 
 effect Yield: once { emit(v: i64); }
@@ -6,7 +6,7 @@ effect Choose: many { among(n: i64) -> i64; }
 effect Log { log(line: u8[:]); }
 
 // a generator with a value: every number of a range, then their sum
-machine fn range(a: i64, b: i64) -> i64 ! Yield {
+resumable fn range(a: i64, b: i64) -> i64 ! Yield {
     var total: i64 = 0;
     for i in a..b {
         emit(i);
@@ -16,7 +16,7 @@ machine fn range(a: i64, b: i64) -> i64 ! Yield {
 }
 
 // delegating to it twice: its values pass out, its sums come back
-machine fn ranges() -> i64 ! Yield + Log {
+resumable fn ranges() -> i64 ! Yield + Log {
     let x = range(0, 3);
     log("first range done");
     let y = range(10, 12);
@@ -25,11 +25,11 @@ machine fn ranges() -> i64 ! Yield + Log {
 }
 
 // a choice made in a callee: every path of the caller through it
-machine fn digit() -> i64 ! Choose {
+resumable fn digit() -> i64 ! Choose {
     let d = among(3);
     return d + 1;
 }
-machine fn pair() -> i64 ! Choose {
+resumable fn pair() -> i64 ! Choose {
     let a = digit();
     let b = digit();
     return a * 10 + b;

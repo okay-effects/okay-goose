@@ -25,8 +25,8 @@ for ex in handlers expressions tour; do
 done
 build/okgc tests/bad_handlers.okg build/bh.goose > build/bad_handlers.out 2>&1
 check bad_handlers build/bad_handlers.out
-build/okgc tests/bad_machine.okg build/bad_machine.goose > build/bad_machine.out 2>&1
-check bad_machine build/bad_machine.out
+build/okgc tests/bad_resumable.okg build/bad_resumable.goose > build/bad_resumable.out 2>&1
+check bad_resumable build/bad_resumable.out
 build/okgc tests/bad_rows.okg build/bad.goose > build/bad_rows.out 2>&1
 check bad_rows build/bad_rows.out
 build/okgc tests/missing_op.okg build/missing.goose && "$goose" build/missing.goose > build/missing.out 2>&1

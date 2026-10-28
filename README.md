@@ -47,16 +47,16 @@ ON THE SAME LINES, so an error Goose reports in the output is at the source's li
 okgc input.okg output.goose
 ```
 
-### Machine fns: the rest as a value
+### Resumable fns: the rest as a value
 
 An effect's kind says what its handlers do with the rest: `tail` (the default) answers and goes on, `once` and
-`many` keep it. In a `machine fn` an operation of a `once`/`many` effect is where the program stops; okgc cuts it
+`many` keep it. In a `resumable fn` an operation of a `once`/`many` effect is where the program stops; okgc cuts it
 there, each rest a frame (a variant naming the stop, its fields the variables it needs), each piece a function.
 
 ```
 effect Choose: many { among(n: i64) -> i64; }
 
-machine fn pick(base: i64) -> i64 ! Choose + Log {
+resumable fn pick(base: i64) -> i64 ! Choose + Log {
     let a = among(3);              // a stop: the rest kept
     log("first chosen");           // a tail operation: the context answers it in place
     let b = among(2);
@@ -73,10 +73,10 @@ statement holding none is copied as it is. Its steps: `enum Pick { Done { v: i64
 the first `pick(cx, base)`, the others `resume(cx, k, v)` by the operation's rest type, `v` of its type — no cast. A
 handler is plain code over the steps: `all` resumes a rest once for each alternative, `first` once, a generator's
 consumer pulls (`examples/loops.okg`). A step is flat: written out as bytes (`to_bytes`), it is resumed from them
-later or elsewhere (`examples/choose.okg`). A variable of a machine fn has a type (op-bound ones take the
+later or elsewhere (`examples/choose.okg`). A variable of a resumable fn has a type (op-bound ones take the
 operation's), one name each.
 
-A machine fn calls a machine fn as a statement (`let x = range(0, 3);`): the callee's steps pass out as the
+A resumable fn calls a resumable fn as a statement (`let x = range(0, 3);`): the callee's steps pass out as the
 caller's — its rest kept in the caller's frame, a field —, its value bound when it is done; resumed, the value goes
 to the callee (`examples/nested.okg`: a generator delegating to another, a choice made in a callee).
 
@@ -98,7 +98,7 @@ handler count_paths for Choose -> i64 {
 }
 ```
 
-One function for the steps of ANY machine fn with those effects (`all(cx, pair(cx), out)`): a loop over the steps,
+One function for the steps of ANY resumable fn with those effects (`all(cx, pair(cx), out)`): a loop over the steps,
 a clause for each. `resume(k, x)` last in a clause goes on in the loop — no stack: a generator of a million values
 is summed in constant stack —; anywhere else it runs the handler on the rest, a deep handler, its value the
 handler's for that rest (`count_paths`). Checked: a clause for every once/many operation, each naming its
@@ -107,11 +107,11 @@ arguments and the rest; no clause for a tail operation (the context answers thos
 ## Layout
 
 - `src/okgc.goose` — the front end
-- `examples/tour.okg` — everything in one file: effects, `A ! F + G`, an interceptor, machine fns, handlers
+- `examples/tour.okg` — everything in one file: effects, `A ! F + G`, an interceptor, resumable fns, handlers
 - `examples/shop.okg` — the shop: effects, sets, `A ! F + G`, an interceptor with forwarding
-- `examples/choose.okg` — a machine fn: all paths, the first, a step saved as bytes and resumed
+- `examples/choose.okg` — a resumable fn: all paths, the first, a step saved as bytes and resumed
 - `examples/loops.okg` — a generator pulled value by value; a search whose `while` stops at each guess
-- `examples/nested.okg` — machine fns calling machine fns: a generator delegating, a choice in a callee
+- `examples/nested.okg` — resumable fns calling resumable fns: a generator delegating, a choice in a callee
 - `examples/handlers.okg` — handlers declared: all paths, the first, the number of paths, a million values summed
 - `examples/expressions.okg` — stops inside expressions: a quiz asking its host, numbers made of choices
 - `proto/01_context.goose` — effects as overloads on a context, an interceptor, an aborting handler

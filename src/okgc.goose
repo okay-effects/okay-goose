@@ -30,13 +30,13 @@ struct Tok { kind: i64, at: i64, len: i64 }
 struct Span { at: i64, len: i64 }
 struct OpDecl { effect: i64, name: Span, params: Span, ret: Span }      // ret.len 0: no value
 // an effect's kind: what its handlers do with the rest — answer and go on (tail), or keep it to resume once or
-// many times (once, many: in a machine fn its operations are where the program stops, the rest a value)
+// many times (once, many: in a resumable fn its operations are where the program stops, the rest a value)
 let TAIL = 0;
 let ONCE = 1;
 let MANY = 2;
 struct EffDecl { name: Span, kind: i64, first_op: i64, n_ops: i64, from: i64, to: i64 }
-struct MVar { name: Span, ty: Span }                 // a variable a machine fn's rest may need: a frame's field
-// a machine fn's stop: the operation, the name its value is bound to (len 0: none), its arguments' parentheses,
+struct MVar { name: Span, ty: Span }                 // a variable a resumable fn's rest may need: a frame's field
+// a resumable fn's stop: the operation, the name its value is bound to (len 0: none), its arguments' parentheses,
 // the statement's tokens, the variables known before it (vars[..nvars]: the frame's fields)
 struct Point { op: i64, bind: Span, args_lp: i64, args_rp: i64, stmt_from: i64, stmt_to: i64, nvars: i64 }
 struct SetDecl { name: Span, first: i64, n: i64, from: i64, to: i64 }  // members[first..first+n]: effects
@@ -49,7 +49,7 @@ struct Fwd { ty: Span, field: Span, set: i64, first_ex: i64, n_ex: i64, from: i6
 struct HDecl { name: Span, set: i64, params: Span, ret: Span, first: i64, n: i64, from: i64, to: i64 }
 struct Clause { op: i64, first_name: i64, n_names: i64, open: i64, close: i64 }
 struct FnDecl { name: Span, name_i: i64, set: i64, gt: i64, lp: i64, rp: i64, no_params: bool, bang_from: i64,
-                bang_to: i64, open: i64, close: i64, machine: bool, kw: i64, ret: Span }
+                bang_to: i64, open: i64, close: i64, resumable: bool, kw: i64, ret: Span }
 
 fn is_alpha(c: u8) -> bool { (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' }
 fn is_digit(c: u8) -> bool { c >= '0' && c <= '9' }
@@ -317,7 +317,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
     }
 
     // fn name<…>(params) -> A ! F + G { body }: a function with effects; any other fn is passed by
-    fn parse_fn(from: i64, machine: bool, kw: i64) -> i64 {
+    fn parse_fn(from: i64, resumable: bool, kw: i64) -> i64 {
         let name_i = next(from + 1);
         var lp = next(name_i + 1);
         var gt = -1;
@@ -346,7 +346,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         guard is_punct(open, '{') else { return open + 1; }
         let close = closing(open, '{', '}');
         if bang < 0 {
-            if machine { error_at(toks[kw].at, "a machine fn says its effects: `-> A ! F + G`"); }
+            if resumable { error_at(toks[kw].at, "a resumable fn says its effects: `-> A ! F + G`"); }
             return close + 1;
         }
         if ret_from >= 0 {
@@ -381,7 +381,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         let name = Span { at: toks[next(bang + 1)].at, len: toks[last].at + toks[last].len - toks[next(bang + 1)].at };
         sets.push(SetDecl { name: name, first: first, n: members.len - first, from: -1, to: -1 });
         fns.push(FnDecl { name: span_of(name_i), name_i: name_i, set: set, gt: gt, lp: lp, rp: rp, no_params: no_params,
-                          bang_from: bang, bang_to: last, open: open, close: close, machine: machine, kw: kw,
+                          bang_from: bang, bang_to: last, open: open, close: close, resumable: resumable, kw: kw,
                           ret: ret });
         return close + 1;
     }
@@ -496,7 +496,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             else if is_word(i, "effects") { i = next(parse_set(i)); }
             else if is_word(i, "forward") { i = next(parse_forward(i)); }
             else if is_word(i, "handler") { i = next(parse_handler(i)); }
-            else if is_word(i, "machine") && is_word(next(i + 1), "fn") { i = next(parse_fn(next(i + 1), true, i)); }
+            else if is_word(i, "resumable") && is_word(next(i + 1), "fn") { i = next(parse_fn(next(i + 1), true, i)); }
             else if is_word(i, "fn") || is_word(i, "recursive") {
                 let f = if is_word(i, "recursive") { next(i + 1) } else { i };
                 i = next(parse_fn(f, false, -1));
@@ -526,9 +526,9 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                             "` of ", text(effs[ops[o].effect].name), ", which ", set_name, " does not have"));
                     }
                     if effs[ops[o].effect].kind == TAIL { passes.push(next(i + 1)); }
-                    else if !d.machine {
+                    else if !d.resumable {
                         error_at(toks[i].at, str("`", tok_text(i), "` keeps the rest of the program (",
-                            text(effs[ops[o].effect].name), " is not tail): it is called in a machine fn"));
+                            text(effs[ops[o].effect].name), " is not tail): it is called in a resumable fn"));
                     }
                 } else if g >= 0 {
                     let gs = sets[fns[g].set];
@@ -602,7 +602,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         }
     }
 
-    // MACHINE FNS: a state machine. Its frame is one struct — where it stopped (`at`) and every variable of the
+    // RESUMABLE FNS: a state machine. Its frame is one struct — where it stopped (`at`) and every variable of the
     // function —; its body `loop { match at { … } }`, cut into blocks only where a statement holds a stop: a stop
     // ends a block (its step returned, the rest a frame), an `if`, `while`, `for` or `loop` holding one becomes
     // jumps between blocks; a statement holding none is copied as it is. Its steps a value: `Done`, or an operation
@@ -617,7 +617,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         return o;
     }
 
-    fn write_machine(d: FnDecl) {
+    fn write_resumable(d: FnDecl) {
         var vars: MVar[>..] = [];
         var stop_at: i64[>..] = [];          // each stop: its block's label, its operation, the variable bound
         var stop_op: i64[>..] = [];
@@ -646,21 +646,21 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         }
         fn add_var(name: Span, ty: Span) -> i64 {
             if var_index(text(name)) >= 0 {
-                error_at(name.at, str("`", text(name), "` declared twice in a machine fn: its variables are the ",
+                error_at(name.at, str("`", text(name), "` declared twice in a resumable fn: its variables are the ",
                     "frame's fields, one name each"));
                 return var_index(text(name));
             }
             vars.push(MVar { name: name, ty: ty });
             return vars.len - 1;
         }
-        // a call of a machine fn: its index, or -1
+        // a call of a resumable fn: its index, or -1
         fn is_sub(i: i64) -> i64 {
             if toks[i].kind != K_IDENT || !is_punct(next(i + 1), '(') { return -1; }
             var before = i - 1;
             while before > 0 && toks[before].kind == K_SPACE { before--; }
             if is_punct(before, '.') || is_word(before, "fn") { return -1; }
             let g = find_fn(span_of(i));
-            if g < 0 || !fns[g].machine { return -1; }
+            if g < 0 || !fns[g].resumable { return -1; }
             return g;
         }
         fn has_stop(from: i64, to: i64) -> bool {
@@ -808,7 +808,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         fn jump(l: i64) { format(body, " at = ", l, "; continue; },\n            "); }
         fn open(l: i64) { format(body, l, " => {"); }
 
-        // a machine fn called: run, its step looked at — its value bound and on, or its operation passed out as this
+        // a resumable fn called: run, its step looked at — its value bound and on, or its operation passed out as this
         // one's step, the callee's rest kept in this frame; resumed, the value given to the callee, looked at again
         fn write_sub(g: i64, bind: i64, lp: i64, rp: i64) {
             let c = fns[g];
@@ -886,7 +886,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                 let o = is_control(t, d.set);
                 let g = is_sub(t);
                 if (o >= 0 || g >= 0) && brace > 0 {
-                    error_at(toks[t].at, str("`", tok_text(t), "` inside a block of an expression: a machine fn stops ",
+                    error_at(toks[t].at, str("`", tok_text(t), "` inside a block of an expression: a resumable fn stops ",
                         "there only as a statement of it"));
                     t++;
                     continue;
@@ -947,7 +947,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             }
             if has_stop(j, e) { extract(rhs, e - 1); }
             if ty.len == 0 {
-                error_at(toks[name_i].at, str("`", tok_text(name_i), "` in a machine fn: its variables are the frame's ",
+                error_at(toks[name_i].at, str("`", tok_text(name_i), "` in a resumable fn: its variables are the frame's ",
                     "fields — give it a type (`let ", tok_text(name_i), ": T = …`)"));
                 return;
             }
@@ -1028,7 +1028,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                     guard is_word(in_i, "in") else { error_at(toks[j].at, "expected `for i in a..b`"); return; }
                     var dots = -1;
                     for t in next(in_i + 1)..ob { if dots < 0 && is_punct(t, '.') && is_punct(t + 1, '.') { dots = t; } }
-                    if var_index(tok_text(name_i)) >= 0 { error_at(toks[name_i].at, str("`", tok_text(name_i), "` declared twice in a machine fn")); }
+                    if var_index(tok_text(name_i)) >= 0 { error_at(toks[name_i].at, str("`", tok_text(name_i), "` declared twice in a resumable fn")); }
                     synth(tok_text(name_i), "i64");
                     var endname: u8[..32] = [];
                     format(endname, "okay_end", fresh_vars);
@@ -1066,7 +1066,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                     let ob = open_brace(next(j + 1));
                     extract(next(j + 1), ob - 1);
                     if has_stop(ob, e) {
-                        error_at(toks[j].at, "a stop inside a `match` arm: a machine fn stops in its body, in if, while, for and loop");
+                        error_at(toks[j].at, "a stop inside a `match` arm: a resumable fn stops in its body, in if, while, for and loop");
                     }
                     format(body, " ");
                     copy_tokens(j, e, true);
@@ -1104,7 +1104,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         // the body, from block 0
         format(body, "0 => {");
         lower(next(d.open + 1), d.close - 1);
-        if has_ret { format(body, " abort(\"okay: machine fn ", n, " ended without a value\"); },\n"); }
+        if has_ret { format(body, " abort(\"okay: resumable fn ", n, " ended without a value\"); },\n"); }
         else { format(body, " return ", pname, ".Done {}; },\n"); }
 
         // a variable's name and type as written (the loops' made-up ones, i64)
@@ -1113,10 +1113,10 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             for v in vars.len { format(mout, ", "); vname(v, mout); format(mout, ": "); vname(v, mout); }
             format(mout, " }");
         }
-        // every once/many operation of its effects is a step's variant: a machine fn calling this one finds its own
+        // every once/many operation of its effects is a step's variant: a resumable fn calling this one finds its own
         fn used(o: i64) -> bool { effs[ops[o].effect].kind != TAIL && set_has(d.set, ops[o].effect) }
 
-        format(mout, "\n// machine fn ", n, " (", path, ":", line_of(toks[d.kw].at), "): its frame, its steps, its blocks\n");
+        format(mout, "\n// resumable fn ", n, " (", path, ":", line_of(toks[d.kw].at), "): its frame, its steps, its blocks\n");
         format(mout, "struct ", pname, "_k { at: i64");
         for v in vars.len { format(mout, ", "); vname(v, mout); format(mout, ": "); vtype(v, mout); }
         format(mout, " }\n");
@@ -1154,7 +1154,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             }
             b++;
         }
-        format(mout, "            _ => { abort(\"okay: machine fn ", n, ": no such block\"); },\n        }\n    }\n}\n");
+        format(mout, "            _ => { abort(\"okay: resumable fn ", n, ": no such block\"); },\n        }\n    }\n}\n");
         // the first step
         format(mout, "fn ", n, "<OkayCx>(cx: OkayCx&");
         if !d.no_params { format(mout, ", ", src[toks[d.lp].at + 1..toks[d.rp].at]); }
@@ -1190,7 +1190,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
 
     fn copy_plain(from: i64, to: i64) { for t in from..to + 1 { mout.append(tok_text(t)); } }
 
-    // A HANDLER: one function for the steps of any machine fn with its effects — a loop over the steps, a clause
+    // A HANDLER: one function for the steps of any resumable fn with its effects — a loop over the steps, a clause
     // for each: `resume(k, x)` last in a clause the loop going on with the rest's next step (no stack), anywhere
     // else this handler run on the rest — a deep handler — its value the handler's for that rest
     fn write_handler(h: HDecl) {
@@ -1314,11 +1314,11 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             for f in fns.len {
                 let d = fns[f];
                 if done { break; }
-                if d.machine {
+                if d.resumable {
                     if i == d.kw {
-                        // the machine fn written at the end; its lines kept as empty ones
+                        // the resumable fn written at the end; its lines kept as empty ones
                         for t in d.kw..d.close + 1 { for c in tok_text(t) { if c == '\n' { out.push('\n'); } } }
-                        write_machine(d);
+                        write_resumable(d);
                         i = d.close + 1;
                         done = true;
                     }
@@ -1358,7 +1358,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
     lex();
     parse();
     check();
-    write_out();          // even with errors: the machine fns are analysed there, their errors reported too
+    write_out();          // even with errors: the resumable fns are analysed there, their errors reported too
     if errors > 0 { return false; }
     out.append(mout);
     // at the end, so that every line of the output is the line of the source it came from: an error Goose reports

@@ -1,4 +1,4 @@
-// okay-goose in one file: effects, a function's effects in its type, an interceptor, a machine fn, handlers.
+// okay-goose in one file: effects, a function's effects in its type, an interceptor, a resumable fn, handlers.
 
 effect Log { log(line: const u8[:]); }                 // tail: the context answers it in place
 effect Pay { charge(cents: i64) -> bool; }
@@ -12,8 +12,8 @@ fn buy(cents: i64) -> bool ! Pay + Log {
     return ok;
 }
 
-// a machine fn: it stops at each choice — the rest a value
-machine fn basket(budget: i64) -> i64 ! Choose + Pay + Log {
+// a resumable fn: it stops at each choice — the rest a value
+resumable fn basket(budget: i64) -> i64 ! Choose + Pay + Log {
     let price: i64 = 10 * (among(3) + 1);              // a stop inside an expression
     if buy(price) {                                    // a plain function with effects, called in it
         return budget - price;
@@ -22,13 +22,13 @@ machine fn basket(budget: i64) -> i64 ! Choose + Pay + Log {
 }
 
 // a generator: a loop stopping at each value
-machine fn evens(n: i64) ! Yield {
+resumable fn evens(n: i64) ! Yield {
     for i in 0..n {
         if i % 2 == 0 { emit(i); }
     }
 }
 
-// handlers: one function for any machine fn with these effects
+// handlers: one function for any resumable fn with these effects
 handler all for Choose(out: i64[>..]&) {
     return(v) { out.push(v); }
     among(n, k) { for i in n { resume(k, i); } }

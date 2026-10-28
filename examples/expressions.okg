@@ -1,10 +1,10 @@
 // Stops inside expressions: each taken out before its statement, left to right, innermost first — in a let, an
-// if's condition, a while's (asked again at each turn), a return; a machine fn's call in an expression too.
+// if's condition, a while's (asked again at each turn), a return; a resumable fn's call in an expression too.
 
 effect Ask: once { ask(q: const u8[:]) -> i64; }   // a question: a literal, so a const slice
 effect Choose: many { among(n: i64) -> i64; }
 
-machine fn quiz() -> i64 ! Ask {
+resumable fn quiz() -> i64 ! Ask {
     let total: i64 = ask("a") + ask("b") * 2;
     if ask("bonus?") > 0 { return total + ask("bonus"); }
     var turns: i64 = 0;
@@ -12,8 +12,8 @@ machine fn quiz() -> i64 ! Ask {
     return total * 100 + turns;
 }
 
-machine fn digit() -> i64 ! Choose { return among(3) + 1; }
-machine fn number() -> i64 ! Choose { return digit() * 10 + digit(); }
+resumable fn digit() -> i64 ! Choose { return among(3) + 1; }
+resumable fn number() -> i64 ! Choose { return digit() * 10 + digit(); }
 
 // the answers in turn, the questions logged
 handler answers for Ask(given: i64[:], at: i64&, asked: u8[>..]&) -> i64 {

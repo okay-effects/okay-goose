@@ -1,11 +1,11 @@
-// Machine fns with loops: a generator pulled value by value, and a search whose loop stops at each guess.
+// Resumable fns with loops: a generator pulled value by value, and a search whose loop stops at each guess.
 
 effect Yield: once { emit(v: i64); }
 effect Guess: many { guess(limit: i64) -> i64; }
 effect Log { log(line: u8[:]); }
 
 // a generator: every even square below n, the odd ones logged
-machine fn squares(n: i64) ! Yield + Log {
+resumable fn squares(n: i64) ! Yield + Log {
     for i in 0..n {
         if i % 2 == 0 {
             emit(i * i);
@@ -17,7 +17,7 @@ machine fn squares(n: i64) ! Yield + Log {
 }
 
 // a loop stopping at each guess: break, continue and return inside it
-machine fn search(target: i64) -> i64 ! Guess + Log {
+resumable fn search(target: i64) -> i64 ! Guess + Log {
     var tries: i64 = 0;
     while true {
         let g = guess(10);

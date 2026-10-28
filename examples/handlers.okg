@@ -1,18 +1,18 @@
-// Handlers declared: one function for the steps of any machine fn with their effects. `resume(k, x)` last in a
+// Handlers declared: one function for the steps of any resumable fn with their effects. `resume(k, x)` last in a
 // clause goes on in a loop (no stack); anywhere else it runs the handler on the rest and is its value there.
 
 effect Choose: many { among(n: i64) -> i64; }
 effect Yield: once { emit(v: i64); }
 effect Log { log(line: u8[:]); }
 
-machine fn pair() -> i64 ! Choose + Log {
+resumable fn pair() -> i64 ! Choose + Log {
     let a = among(3);
     log("a chosen");
     let b = among(2);
     return a * 10 + b;
 }
 
-machine fn numbers(n: i64) ! Yield {
+resumable fn numbers(n: i64) ! Yield {
     for i in 0..n { emit(i); }
 }
 

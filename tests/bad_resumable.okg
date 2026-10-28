@@ -1,19 +1,19 @@
 effect Choose: many { among(n: i64) -> i64; }
 
-fn plain() -> i64 ! Choose { among(2) }                 // keeps the rest: only in a machine fn
+fn plain() -> i64 ! Choose { among(2) }                 // keeps the rest: only in a resumable fn
 
-machine fn inside(flag: bool) -> i64 ! Choose {
+resumable fn inside(flag: bool) -> i64 ! Choose {
     let x: i64 = if flag { among(2) } else { 0 };       // a stop in a block of an expression: it may not run
     return x;
 }
 
-machine fn untyped() -> i64 ! Choose {
+resumable fn untyped() -> i64 ! Choose {
     let half = 21;                                      // a frame's field, no type
     let a = among(2);
     return half + a;
 }
 
-machine fn twice() -> i64 ! Choose {
+resumable fn twice() -> i64 ! Choose {
     let a = among(2);
     let a = among(3);                                   // one name, one field
     return a;
