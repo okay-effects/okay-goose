@@ -107,6 +107,7 @@ arguments and the rest; no clause for a tail operation (the context answers thos
 ## Layout
 
 - `src/okgc.goose` — the front end
+- `examples/tour.okg` — everything in one file: effects, `A ! F + G`, an interceptor, machine fns, handlers
 - `examples/shop.okg` — the shop: effects, sets, `A ! F + G`, an interceptor with forwarding
 - `examples/choose.okg` — a machine fn: all paths, the first, a step saved as bytes and resumed
 - `examples/loops.okg` — a generator pulled value by value; a search whose `while` stops at each guess

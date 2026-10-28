@@ -19,7 +19,7 @@ build/okgc examples/loops.okg build/loops.goose && "$goose" build/loops.goose > 
 check loops build/loops.out
 build/okgc examples/nested.okg build/nested.goose && "$goose" build/nested.goose > build/nested.out 2>&1
 check nested build/nested.out
-for ex in handlers expressions; do
+for ex in handlers expressions tour; do
     build/okgc examples/$ex.okg build/$ex.goose && "$goose" build/$ex.goose > build/$ex.out 2>&1
     check $ex build/$ex.out
 done

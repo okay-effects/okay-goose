@@ -1,0 +1,75 @@
+// okay-goose in one file: effects, a function's effects in its type, an interceptor, a machine fn, handlers.
+
+effect Log { log(line: const u8[:]); }                 // tail: the context answers it in place
+effect Pay { charge(cents: i64) -> bool; }
+effect Choose: many { among(n: i64) -> i64; }          // many: the rest kept, resumed for each alternative
+effect Yield: once { emit(v: i64); }                   // once: the rest kept, resumed once
+
+// A ! F + G: a value and the effects it asks for; the context is implicit
+fn buy(cents: i64) -> bool ! Pay + Log {
+    let ok = charge(cents);
+    if ok { log("paid"); } else { log("refused"); }
+    return ok;
+}
+
+// a machine fn: it stops at each choice — the rest a value
+machine fn basket(budget: i64) -> i64 ! Choose + Pay + Log {
+    let price: i64 = 10 * (among(3) + 1);              // a stop inside an expression
+    if buy(price) {                                    // a plain function with effects, called in it
+        return budget - price;
+    }
+    return budget;
+}
+
+// a generator: a loop stopping at each value
+machine fn evens(n: i64) ! Yield {
+    for i in 0..n {
+        if i % 2 == 0 { emit(i); }
+    }
+}
+
+// handlers: one function for any machine fn with these effects
+handler all for Choose(out: i64[>..]&) {
+    return(v) { out.push(v); }
+    among(n, k) { for i in n { resume(k, i); } }
+}
+handler collect for Yield(out: i64[>..]&) {
+    return() { }
+    emit(v, k) { out.push(v); resume(k); }             // last: a loop, no stack
+}
+
+// a context: its handlers of the tail effects, its state in its fields
+struct Shop { balance: i64, lines: i64 }
+fn log(cx: Shop&, line: const u8[:]) { cx.lines += 1; }
+fn charge(cx: Shop&, cents: i64) -> bool {
+    if cents > cx.balance { return false; }
+    cx.balance -= cents;
+    return true;
+}
+
+// an interceptor: a limit around any context; Log passed on to the inner one
+struct Limited<H> { inner: H, limit: i64 }
+fn charge<H>(cx: Limited<H>&, cents: i64) -> bool {
+    if cents > cx.limit { return false; }
+    return charge(cx.inner, cents);
+}
+effects Logged = Log;
+forward Limited<H> to inner for Logged;
+
+fn main() {
+    var shop = Shop { balance: 100, lines: 0 };
+    print("buy 30: ", buy(shop, 30), ", balance ", shop.balance);
+
+    var left: i64[>..] = [];
+    all(shop, basket(shop, 1000), left);               // every price tried, each a real charge
+    print("baskets: ", left, ", balance ", shop.balance, ", logged ", shop.lines);
+
+    var guarded = Limited<Shop> { inner: Shop { balance: 100, lines: 0 }, limit: 15 };
+    var left2: i64[>..] = [];
+    all(guarded, basket(guarded, 1000), left2);        // the same program, under a limit
+    print("under a limit of 15: ", left2);
+
+    var got: i64[>..] = [];
+    collect(shop, evens(shop, 10), got);
+    print("evens: ", got);
+}

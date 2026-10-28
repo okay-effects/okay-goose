@@ -1,0 +1,4 @@
+buy 30: true, balance 70
+baskets: [990, 980, 970], balance 10, logged 4
+under a limit of 15: [990, 1000, 1000]
+evens: [0, 2, 4, 6, 8]
