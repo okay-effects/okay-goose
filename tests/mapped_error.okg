@@ -1,0 +1,8 @@
+effect Choose: many { among(n: i64) -> i64; }
+resumable fn f() -> i64 ! Choose {
+    let a = among(2);
+    let b: bool = a + 1;            // a type error inside a resumable fn
+    return a;
+}
+struct C { }
+fn main() { var c = C { }; let s = f(c); }

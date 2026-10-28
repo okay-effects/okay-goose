@@ -44,8 +44,15 @@ Goose's error, naming it); `requires_Shop(cx)` for each set; the forwarding func
 ON THE SAME LINES, so an error Goose reports in the output is at the source's line.
 
 ```
-okgc input.okg output.goose
+okgc run input.okg [args…]          # compiled and run (GOOSE: the goose compiler, default `goose`)
+okgc build input.okg -o program     # compiled to an executable
+okgc input.okg output.goose         # Goose written out
 ```
+
+`run` and `build` write the Goose to `.okgc/` and name the source's lines in the compiler's messages: the source's
+own lines are the output's, and each statement of a resumable fn is written on a line of its own, mapped back to
+the source's (`tests/mapped_error.okg`). Goose has no way to start a process; okgc does it through C's `system`
+(`src/okay_run.c`, built with it by `src/okgc.build`).
 
 ### Resumable fns: the rest as a value
 
@@ -102,7 +109,8 @@ One function for the steps of ANY resumable fn with those effects (`all(cx, pair
 a clause for each. `resume(k, x)` last in a clause goes on in the loop — no stack: a generator of a million values
 is summed in constant stack —; anywhere else it runs the handler on the rest, a deep handler, its value the
 handler's for that rest (`count_paths`). Checked: a clause for every once/many operation, each naming its
-arguments and the rest; no clause for a tail operation (the context answers those). `examples/handlers.okg`.
+arguments and the rest; no clause for a tail operation (the context answers those); a ONCE effect's rest resumed at
+most once — one `resume`, not in a loop, `k` used by it alone. `examples/handlers.okg`.
 
 ## Layout
 

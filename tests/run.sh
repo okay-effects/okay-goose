@@ -23,6 +23,9 @@ for ex in handlers expressions tour; do
     build/okgc examples/$ex.okg build/$ex.goose && "$goose" build/$ex.goose > build/$ex.out 2>&1
     check $ex build/$ex.out
 done
+# okgc run: the compiler's message on a line of a resumable fn, named by the source's line
+GOOSE="$goose" build/okgc run tests/mapped_error.okg > build/mapped_error.out 2>&1
+check mapped_error build/mapped_error.out
 build/okgc tests/bad_handlers.okg build/bh.goose > build/bad_handlers.out 2>&1
 check bad_handlers build/bad_handlers.out
 build/okgc tests/bad_resumable.okg build/bad_resumable.goose > build/bad_resumable.out 2>&1

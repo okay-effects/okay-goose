@@ -1,0 +1,5 @@
+tests/mapped_error.okg:4: error: expected a value of type bool, got i64
+                 b = a + 1;
+  in fn run_f(C&, F_k) instantiated from tests/mapped_error.okg:2
+  in fn f(C&) instantiated from tests/mapped_error.okg:8
+  in fn main() instantiated from tests/mapped_error.okg:8

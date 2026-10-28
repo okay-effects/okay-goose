@@ -54,8 +54,9 @@ struct FnDecl { name: Span, name_i: i64, set: i64, gt: i64, lp: i64, rp: i64, no
 fn is_alpha(c: u8) -> bool { (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' }
 fn is_digit(c: u8) -> bool { c >= '0' && c <= '9' }
 
-// The whole run over one file: false when it found errors (printed, nothing written).
-fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
+// The whole run over one file: false when it found errors (printed, nothing written). `lines`: for each line of the
+// output (from 1), the source's line it came from
+fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]&) -> bool {
     var toks: Tok[>..] = [];
     var ops: OpDecl[>..] = [];
     var effs: EffDecl[>..] = [];
@@ -649,6 +650,8 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
     // with its arguments and its rest `k` — flat: copied to resume again, written out as bytes. The first step
     // `name(cx, …)`, the others `resume(cx, k, v)`, by the operation's rest type, `v` of its type: no cast
     var mout: u8[>..] = [];
+    var seg_start: i64[>..] = [];        // where each written-out part begins in mout, and its source line
+    var seg_line: i64[>..] = [];
 
     fn is_control(i: i64, set: i64) -> i64 {
         if toks[i].kind != K_IDENT || !is_punct(next(i + 1), '(') { return -1; }
@@ -998,10 +1001,14 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             }
         }
 
+        // the statement's source line: a line of its own in the output, mapped back to it
+        fn line_mark(j: i64) { body.push(3); format(body, line_of(toks[j].at)); body.push(4); }
+
         recursive fn lower(from: i64, to: i64) {
             var j = next(from);
             while j <= to && j < d.close {
                 let e = stmt_end(j, to + 1);
+                line_mark(j);
                 if is_word(j, "let") || is_word(j, "var") {
                     lower_let(j, e);
                 } else if !has_stop(j, e) {
@@ -1156,6 +1163,8 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         // every once/many operation of its effects is a step's variant: a resumable fn calling this one finds its own
         fn used(o: i64) -> bool { effs[ops[o].effect].kind != TAIL && set_has(d.set, ops[o].effect) }
 
+        seg_start.push(mout.len);
+        seg_line.push(line_of(toks[d.kw].at));
         format(mout, "\n// resumable fn ", n, " (", path, ":", line_of(toks[d.kw].at), "): its frame, its steps, its blocks\n");
         format(mout, "struct ", pname, "_k { at: i64");
         for v in vars.len { format(mout, ", "); vname(v, mout); format(mout, ": "); vtype(v, mout); }
@@ -1189,12 +1198,22 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                 b++;
                 while body[b] != 2 { l = l * 10 + (body[b] - '0'); b++; }
                 frame(l);
+            } else if body[b] == 3 {
+                var l = 0;
+                b++;
+                while body[b] != 4 { l = l * 10 + (body[b] - '0'); b++; }
+                seg_start.push(mout.len);          // the newline's own position: the line after it is l
+                seg_line.push(l);
+                mout.append("\n                ");
             } else {
                 mout.push(body[b]);
             }
             b++;
         }
-        format(mout, "            _ => { abort(\"okay: resumable fn ", n, ": no such block\"); },\n        }\n    }\n}\n");
+        // after the blocks, the declaration's line again
+        seg_start.push(mout.len);
+        seg_line.push(line_of(toks[d.kw].at));
+        format(mout, "\n            _ => { abort(\"okay: resumable fn ", n, ": no such block\"); },\n        }\n    }\n}\n");
         // the first step
         format(mout, "fn ", n, "<OkayCx>(cx: OkayCx&");
         if !d.no_params { format(mout, ", ", src[toks[d.lp].at + 1..toks[d.rp].at]); }
@@ -1287,6 +1306,8 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             if tail >= 0 { return; }
             if has_ret { format(mout, " } "); } else { format(mout, " } return;"); }
         }
+        seg_start.push(mout.len);
+        seg_line.push(line_of(toks[h.from].at));
         format(mout, "\n// handler ", hn, " (", path, ":", line_of(toks[h.from].at), ")\n");
         format(mout, "recursive fn ", hn, "<OkayCx, OkayStep>(cx: OkayCx&, start: OkayStep");
         if h.params.len > 0 { format(mout, ", ", text(h.params)); }
@@ -1400,6 +1421,18 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
     check();
     write_out();          // even with errors: the resumable fns are analysed there, their errors reported too
     if errors > 0 { return false; }
+    // the line map: the source's own lines as they are, each written-out part's its declaration's
+    let base = out.len;
+    var line = 1;
+    lines.push(0);
+    lines.push(1);
+    for i in base { if out[i] == '\n' { line++; lines.push(line); } }
+    var seg = 0;
+    for i in mout.len {
+        while seg + 1 < seg_start.len && seg_start[seg + 1] <= i { seg++; }
+        if mout[i] == '\n' { lines.push(if seg < seg_line.len { seg_line[seg] } else { line }); }
+    }
+    lines.push(line);
     out.append(mout);
     // at the end, so that every line of the output is the line of the source it came from: an error Goose reports
     // in the output names the source's line
@@ -1411,16 +1444,87 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
     return true;
 }
 
+extern fn okay_system(cmd: const u8[:]) -> i32;
+
+// a word for the shell, in single quotes
+fn quote(out: u8[>..]&, w: u8[:]) {
+    out.push('\'');
+    for c in w { if c == '\'' { out.append("'\\''"); } else { out.push(c); } }
+    out.push('\'');
+}
+
+// the compiler's messages with the output's lines named as the source's: `out.goose:N` becomes `in.okg:M`
+fn mapped(msgs: u8[:], out_path: u8[:], in_path: u8[:], lines: i64[:]) {
+    var i = 0;
+    var text: u8[>..] = [];
+    while i < msgs.len {
+        if i + out_path.len < msgs.len && msgs[i..i + out_path.len] == out_path && msgs[i + out_path.len] == ':' {
+            var j = i + out_path.len + 1;
+            var n = 0;
+            while j < msgs.len && msgs[j] >= '0' && msgs[j] <= '9' { n = n * 10 + (msgs[j] - '0'); j++; }
+            if j > i + out_path.len + 1 {
+                text.append(in_path);
+                format(text, ":", if n < lines.len { lines[n] } else { n });
+                i = j;
+                continue;
+            }
+        }
+        text.push(msgs[i]);
+        i++;
+    }
+    write_stderr(text);
+}
+
 fn main() {
     let a = args();
-    guard a.len == 3 else {
-        print("usage: okgc input.okg output.goose");
+    let usage = "usage: okgc input.okg output.goose | okgc run input.okg [args…] | okgc build input.okg -o program";
+    guard a.len >= 3 else {
+        print(usage);
         exit(2);
     }
+    let mode = if a[1] == "run" || a[1] == "build" { a[1] } else { "" };
+    let input = if mode.len > 0 { a[2] } else { a[1] };
     var src: u8[>..] = [];
-    guard read_file(a[1], src) else {
-        print("okgc: cannot read ", a[1]);
+    guard read_file(input, src) else {
+        print("okgc: cannot read ", input);
         exit(2);
     }
-    if !compile(a[1], src, a[2]) { exit(1); }
+    var lines: i64[>..] = [];
+    if mode.len == 0 {
+        guard a.len == 3 else { print(usage); exit(2); }
+        if !compile(input, src, a[2], lines) { exit(1); }
+        return;
+    }
+    // run or build: the output beside, in .okgc/, the compiler run on it, its messages mapped back
+    make_dir(".okgc");
+    var base_at = 0;
+    for i in input.len { if input[i] == '/' { base_at = i + 1; } }
+    var out_path: u8[>..] = [];
+    format(out_path, ".okgc/", input[base_at..]);
+    if out_path.len > 4 && out_path[out_path.len - 4..] == ".okg" { out_path.resize(out_path.len - 4); }
+    out_path.append(".goose");
+    if !compile(input, src, out_path, lines) { exit(1); }
+    var goose: u8[>..] = [];
+    if !env("GOOSE", goose) { goose.append("goose"); }
+    var cmd: u8[>..] = [];
+    quote(cmd, goose);
+    if mode == "build" {
+        guard a.len == 5 && a[3] == "-o" else { print(usage); exit(2); }
+        format(cmd, " build ");
+        quote(cmd, out_path);
+        format(cmd, " -o ");
+        quote(cmd, a[4]);
+    } else {
+        format(cmd, " ");
+        quote(cmd, out_path);
+        if a.len > 3 {
+            format(cmd, " --");
+            for k in 3..a.len { format(cmd, " "); quote(cmd, a[k]); }
+        }
+    }
+    format(cmd, " 2> .okgc/messages.txt");
+    let status = okay_system(cmd);
+    var msgs: u8[>..] = [];
+    if read_file(".okgc/messages.txt", msgs) { mapped(msgs, out_path, input, lines); }
+    if status != 0 { exit(status); }
 }
