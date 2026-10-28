@@ -126,6 +126,7 @@ most once — one `resume`, not in a loop, `k` used by it alone. `examples/handl
 - `proto/01_context.goose` — effects as overloads on a context, an interceptor, an aborting handler
 - `proto/02_machine.goose` — a machine: defunctionalized frames, `among` taking `k`, the `all` handler resuming it
   for each alternative; `k` as bytes and back
+- `bench/lanes.okg`, `bench/results.md` — lanes against okay-rust and Scala
 - `tests/run.sh` — builds okgc, runs everything, compares with `tests/expected`
 
 ```

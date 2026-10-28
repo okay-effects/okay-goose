@@ -1,0 +1,125 @@
+// okay-goose's lanes, as okay-rust's (machine/benches/kernel.rs): the same programs and n, µs per run — warm-up a
+// second, then five rounds of a second. The direct style (G:), the resumable fns and handlers (R:).
+
+import os;
+import math;
+
+effect State { get() -> i64; put(v: i64); }
+effect Tell { tell(v: i64); }
+effect Yield: once { emit(v: i64); }
+effect Choose: many { among(n: i64) -> i64; }
+effect Tick: many { tick(v: i64) -> i64; }
+
+// THE DIRECT STYLE: operations answered by the context in place
+
+fn counting(n: i64) -> i64 ! State {
+    for i in 0..n { put(get() + 1); }
+    return get();
+}
+fn telling(n: i64) ! Tell {
+    for i in 0..n { tell(i); }
+}
+
+struct Cell { v: i64 }
+fn get(cx: Cell&) -> i64 { cx.v }
+fn put(cx: Cell&, v: i64) { cx.v = v; }
+
+struct Collect { out: i64[>..] }
+fn tell(cx: Collect&, v: i64) { cx.out.push(v); }
+
+// THE RESUMABLE FNS: each operation a step, its rest resumed by a handler
+
+resumable fn numbers(n: i64) ! Yield {
+    for i in 0..n { emit(i); }
+}
+resumable fn pick(n: i64) -> i64 ! Choose {
+    let i = among(n);
+    return i + 1;
+}
+// as okay-rust's `general`: a deep handler taking the rest at every step
+resumable fn ticks(n: i64) -> bool ! Tick {
+    var even: bool = true;
+    for i in 0..n {
+        let v = tick(i);
+        even = !even;
+    }
+    return even;
+}
+
+handler sum for Yield(total: i64&) {
+    return() { }
+    emit(v, k) { total += v; resume(k); }
+}
+handler count_all for Choose(found: i64&) {
+    return(v) { found += 1; }
+    among(n, k) { for i in n { resume(k, i); } }
+}
+handler answer for Tick -> bool {
+    return(v) { v }
+    tick(v, k) { resume(k, v) }
+}
+
+struct None { }
+
+var sink = 0;
+
+fn lane<F>(name: u8[:]) {
+    let second = 1000000000;
+    var t = clock_ns();
+    while clock_ns() - t < second { sink += F(); }
+    var rounds: f64[..5] = [];
+    for r in 5 {
+        t = clock_ns();
+        var runs = 0;
+        while clock_ns() - t < second { sink += F(); runs++; }
+        rounds.push((clock_ns() - t) as f64 / 1000.0 / runs as f64);
+    }
+    var mean = 0.0;
+    for x in rounds { mean += x; }
+    mean /= 5.0;
+    var sd = 0.0;
+    for x in rounds { sd += (x - mean) * (x - mean); }
+    sd = sqrt(sd / 4.0);
+    var line: u8[>..] = [];
+    format(line, name);
+    while line.len < 14 { line.push(' '); }
+    format_flt(line, mean, 3);
+    format(line, " ± ");
+    format_flt(line, sd, 3);
+    format(line, " us/op");
+    print(line);
+}
+
+fn main() {
+    let n: i64 = 1000 + arg_count() * 0;      // opaque to the compiler: not folded as a constant
+    let only = if arg_count() > 1 { args()[1] } else { "" };
+    var none = None { };
+    if only == "check" { print("checking"); }
+    if only.len == 0 || only == "G:state" {
+        lane("G:state") { var c = Cell { v: 0 }; counting(c, n) };
+    }
+    if only.len == 0 || only == "G:writer" {
+        lane("G:writer") { var c = Collect { out: [] }; telling(c, n); var s = 0; for x in c.out { s += x; } s };
+    }
+    if only.len == 0 || only == "R:generate" {
+        lane("R:generate") { var total = 0; sum(none, numbers(none, n), total); total };
+    }
+    if only.len == 0 || only == "R:choose" {
+        lane("R:choose") { var found = 0; count_all(none, pick(none, n), found); found };
+    }
+    if only.len == 0 || only == "R:general" {
+        lane("R:general") { if answer(none, ticks(none, n)) { 1 } else { 0 } };
+    }
+    if only == "check" {
+        var c = Cell { v: 0 };
+        var w = Collect { out: [] };
+        telling(w, n);
+        var total = 0;
+        sum(none, numbers(none, n), total);
+        var found = 0;
+        count_all(none, pick(none, n), found);
+        print("state ", counting(c, n), ", told ", w.out.len, " last ", w.out[w.out.len - 1], ", sum ", total,
+              ", paths ", found, ", even ", answer(none, ticks(none, n)));
+    }
+    if sink == 42 { print(""); }
+}
