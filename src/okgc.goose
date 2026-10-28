@@ -673,6 +673,12 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
         var rep_var: i64[>..] = [];
         var labels = 1;
         var fresh_vars = 0;
+        // which variables the frame keeps: each variable's first block (-1: none yet), whether it is used in
+        // another too; each block's being inside a lowered loop (entered again after a stop)
+        var cur_block = 0;
+        var vblock: i64[>..] = [];
+        var vmulti: i64[>..] = [];
+        var loopy: i64[>..] = [];
         let n = text(d.name);
         var pname: u8[>..] = [];
         if n[0] >= 'a' && n[0] <= 'z' { pname.push(n[0] - 32); } else { pname.push(n[0]); }
@@ -694,6 +700,8 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                 return var_index(text(name));
             }
             vars.push(MVar { name: name, ty: ty });
+            vblock.push(-1);
+            vmulti.push(0);
             return vars.len - 1;
         }
         // a call of a resumable fn: its index, or -1
@@ -716,12 +724,19 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             let ta = syn.len;
             syn.append(ty);
             vars.push(MVar { name: Span { at: -(na + 1), len: name.len }, ty: Span { at: -(ta + 1), len: ty.len } });
+            vblock.push(-1);
+            vmulti.push(0);
             return vars.len - 1;
         }
         // a variable's name and type as written, or made up
         fn vtext(sp: Span) -> u8[:] { if sp.at < 0 { syn[-sp.at - 1..-sp.at - 1 + sp.len] } else { text(sp) } }
         fn vname(v: i64, buf: u8[>..]&) { buf.append(vtext(vars[v].name)); }
         fn vtype(v: i64, buf: u8[>..]&) { buf.append(vtext(vars[v].ty)); }
+        fn use_var(v: i64) {
+            if v < 0 { return; }
+            if vblock[v] < 0 { vblock[v] = cur_block; } else if vblock[v] != cur_block { vmulti[v] = 1; }
+        }
+        fn mark(name: u8[:]) { use_var(var_index(name)); }
         // the last token of the statement starting at j: its `;`, or the `}` ending it (an if's last branch)
         fn stmt_end(j: i64, limit: i64) -> i64 {
             var e = j;
@@ -765,6 +780,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                 for q in rep_from.len { if rep_from[q] == t { replaced = q; } }
                 if replaced >= 0 {
                     vname(rep_var[replaced], body);
+                    use_var(rep_var[replaced]);
                     t = rep_to[replaced] + 1;
                     continue;
                 }
@@ -808,6 +824,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                     t = v;
                     continue;
                 }
+                if toks[t].kind == K_IDENT { mark(tok_text(t)); }
                 body.append(tok_text(t));
                 t++;
             }
@@ -849,7 +866,12 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             format(body, " } }; },\n            ", l, " => {");
         }
         fn jump(l: i64) { format(body, " at = ", l, "; continue; },\n            "); }
-        fn open(l: i64) { format(body, l, " => {"); }
+        fn open(l: i64) {
+            format(body, l, " => {");
+            cur_block = l;
+            while loopy.len <= l { loopy.push(0); }
+            loopy[l] = if loops.len > 0 { 1 } else { 0 };
+        }
 
         // a resumable fn called: run, its step looked at — its value bound and on, or its operation passed out as this
         // one's step, the callee's rest kept in this frame; resumed, the value given to the callee, looked at again
@@ -866,12 +888,14 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             let li = new_label();
             let ln = new_label();
             format(body, " ", sname, " = ", cname, "(cx");
+            mark(sname);
             if next(lp + 1) != rp { format(body, ", "); copy_tokens(next(lp + 1), rp - 1, false); }
             format(body, ");");
             jump(li);
             open(li);
             format(body, " match ", sname, " { Done okay_d => {");
-            if bind >= 0 { format(body, " "); vname(bind, body); format(body, " = okay_d.v;"); }
+            mark(sname);
+            if bind >= 0 { format(body, " "); vname(bind, body); use_var(bind); format(body, " = okay_d.v;"); }
             format(body, " at = ", ln, "; continue; },");
             for o in ops.len {
                 if effs[ops[o].effect].kind == TAIL || !set_has(c.set, ops[o].effect) { continue; }
@@ -894,6 +918,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                 format(body, " ");
                 cap_to(body, text(op.name));
                 format(body, " okay_o => { ", kname, " = okay_o.k; return ", pname, ".");
+                mark(kname);
                 cap_to(body, text(op.name));
                 format(body, " { ");
                 each_param(op.params) { pn, ty => format(body, pn, ": okay_o.", pn, ", "); };
@@ -911,7 +936,11 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                 for q in stop_at.len { if stop_op[q] == o && lr < 0 && stop_at[q] > li { lr = stop_at[q]; vv = stop_bind[q]; } }
                 open(lr);
                 format(body, " ", sname, " = resume(cx, okay_k", nsub, "_", text(op.name));
-                if vv >= 0 { format(body, ", "); vname(vv, body); }
+                mark(sname);
+                var kn: u8[..48] = [];
+                format(kn, "okay_k", nsub, "_", text(op.name));
+                mark(kn);
+                if vv >= 0 { format(body, ", "); vname(vv, body); use_var(vv); }
                 format(body, ");");
                 jump(li);
             }
@@ -997,6 +1026,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             add_var(span_of(name_i), ty);
             if is_punct(after, '=') {
                 format(body, " ", tok_text(name_i), " = ");
+                mark(tok_text(name_i));
                 copy_tokens(rhs, e, true);
             }
         }
@@ -1083,6 +1113,8 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                     synth(endname, "i64");
                     extract(next(in_i + 1), ob - 1);
                     format(body, " ", tok_text(name_i), " = ");
+                    mark(tok_text(name_i));
+                    mark(endname);
                     if dots >= 0 { format(body, "("); copy_tokens(next(in_i + 1), dots - 1, false); format(body, ")"); }
                     else { format(body, "0"); }
                     format(body, "; ", endname, " = (");
@@ -1094,6 +1126,8 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                     let lx = new_label();
                     jump(lh);
                     open(lh);
+                    mark(tok_text(name_i));
+                    mark(endname);
                     format(body, " if ", tok_text(name_i), " < ", endname, " { at = ", lb, "; } else { at = ", lx,
                         "; } continue; },\n            ");
                     open(lb);
@@ -1104,6 +1138,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                     jump(lc);
                     open(lc);
                     format(body, " ", tok_text(name_i), " += 1;");
+                    mark(tok_text(name_i));
                     jump(lh);
                     open(lx);
                 } else if is_punct(j, '{') {
@@ -1155,9 +1190,17 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
         else { format(body, " return ", pname, ".Done {}; },\n"); }
 
         // a variable's name and type as written (the loops' made-up ones, i64)
+        // kept by the frame: a parameter, a variable a stop binds, one used in two blocks or in a block entered again
+        // after a stop (a lowered loop's); the others are the machine's locals, not copied at each stop
+        fn kept(v: i64) -> bool {
+            if v < n_params || vmulti[v] == 1 { return true; }
+            for q in stop_bind { if q == v { return true; } }
+            let b = vblock[v];
+            return b >= 0 && b < loopy.len && loopy[b] == 1;
+        }
         fn frame(l: i64) {
             format(mout, pname, "_k { at: ", l);
-            for v in vars.len { format(mout, ", "); vname(v, mout); format(mout, ": "); vname(v, mout); }
+            for v in vars.len { if kept(v) { format(mout, ", "); vname(v, mout); format(mout, ": "); vname(v, mout); } }
             format(mout, " }");
         }
         // every once/many operation of its effects is a step's variant: a resumable fn calling this one finds its own
@@ -1167,7 +1210,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
         seg_line.push(line_of(toks[d.kw].at));
         format(mout, "\n// resumable fn ", n, " (", path, ":", line_of(toks[d.kw].at), "): its frame, its steps, its blocks\n");
         format(mout, "struct ", pname, "_k { at: i64");
-        for v in vars.len { format(mout, ", "); vname(v, mout); format(mout, ": "); vtype(v, mout); }
+        for v in vars.len { if kept(v) { format(mout, ", "); vname(v, mout); format(mout, ": "); vtype(v, mout); } }
         format(mout, " }\n");
         for o in ops.len { if used(o) { format(mout, "struct ", pname, "_", text(ops[o].name), " { k: ", pname, "_k }\n"); } }
         format(mout, "enum ", pname, " { Done { ");
@@ -1189,7 +1232,13 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
         mout.append(out[saved..]);
         out.resize(saved);
         format(mout, "\n    var at = k.at;");
-        for v in vars.len { format(mout, " var "); vname(v, mout); format(mout, " = k."); vname(v, mout); format(mout, ";"); }
+        for v in vars.len {
+            format(mout, " var ");
+            vname(v, mout);
+            if kept(v) { format(mout, " = k."); vname(v, mout); }
+            else { format(mout, ": "); vtype(v, mout); format(mout, " = default<"); vtype(v, mout); format(mout, ">()"); }
+            format(mout, ";");
+        }
         format(mout, "\n    loop {\n        match at {\n            ");
         var b = 0;
         while b < body.len {
@@ -1219,6 +1268,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
         if !d.no_params { format(mout, ", ", src[toks[d.lp].at + 1..toks[d.rp].at]); }
         format(mout, ") -> ", pname, " { return run_", n, "(cx, ", pname, "_k { at: 0");
         for v in vars.len {
+            if !kept(v) { continue; }
             format(mout, ", ");
             vname(v, mout);
             format(mout, ": ");

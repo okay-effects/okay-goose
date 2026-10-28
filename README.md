@@ -72,8 +72,9 @@ resumable fn pick(base: i64) -> i64 ! Choose + Log {
 }
 ```
 
-Written out, a STATE MACHINE: its frame one struct — where it stopped (`at`) and every variable of the function
-(`struct Pick_k { at: i64, base: i64, a: i64, b: i64, sum: i64 }`) —, its body `loop { match at { … } }`, cut into
+Written out, a STATE MACHINE: its frame one struct — where it stopped (`at`) and the variables that live across a
+stop: the parameters, the ones stops bind, the ones used in two blocks or in a loop entered again after a stop
+(`struct Pick_k { at: i64, base: i64, a: i64, b: i64 }`; `sum`, used in one block, is a local of the machine) —, its body `loop { match at { … } }`, cut into
 blocks only where a statement holds a stop: a stop ends a block (its step returned, the rest a frame), an `if`,
 `while`, `for` or `loop` holding one becomes jumps between blocks (`break`, `continue` and `return` inside too), a
 statement holding none is copied as it is. Its steps: `enum Pick { Done { v: i64 }, Among { n: i64, k: Pick_among } }`;
