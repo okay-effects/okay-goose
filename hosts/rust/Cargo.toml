@@ -1,0 +1,11 @@
+[package]
+name = "okay-goose-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A Rust host for okay-goose over okay's wire: Rust handlers answering a Goose program, a Goose shop answering a Rust program"
+
+[dependencies]
+okay = { package = "okay-rust", path = "../../../okay-rust" }
+
+[workspace]

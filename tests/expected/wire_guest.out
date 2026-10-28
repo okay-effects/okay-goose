@@ -1,0 +1,4 @@
+{"op":"reserve","args":{"item":"book"}}
+{"op":"charge","args":{"user":"bob","cents":2000}}
+{"op":"log","args":{"line":"paid"}}
+{"done":42}

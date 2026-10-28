@@ -1,0 +1,4 @@
+{"op":"approve","args":{"cents":100}}
+{"op":"approve","args":{"cents":200}}
+{"op":"approve","args":{"cents":300}}
+{"done":2}

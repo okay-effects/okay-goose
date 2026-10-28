@@ -1,0 +1,60 @@
+// Over the wire: effects declared `wire` cross to another language — okay's wire, a line of JSON a message on
+// stdin and stdout. Three ways, chosen by the first argument:
+//   guest      the checkout's operations answered by the host (another language's handlers)
+//   approvals  a resumable fn's stops answered by the host
+//   serve      the host's program's operations answered here, by the shop
+// hosts/rust runs all three against okay-rust.
+
+effect Stock: wire { reserve(item: const u8[:]) -> bool; }
+effect Pay: wire { charge(user: const u8[:], cents: i64) -> i64; }
+effect Log: wire { log(line: const u8[:]); }
+effect Approve: once, wire { approve(cents: i64) -> bool; }
+
+// the business code, as in any context
+fn checkout(user: const u8[:], item: const u8[:], cents: i64) -> i64 ! Stock + Pay + Log {
+    if !reserve(item) {
+        log("out of stock");
+        return -1;
+    }
+    let receipt = charge(user, cents);
+    log("paid");
+    return receipt;
+}
+
+// a resumable fn: each amount stops for a manager's approval
+resumable fn approvals(n: i64) -> i64 ! Approve {
+    var approved: i64 = 0;
+    for i in 0..n {
+        if approve(100 * (i + 1)) { approved += 1; }
+    }
+    return approved;
+}
+
+// the shop, in process: what `serve` answers with (stdout is the wire: its log goes to stderr)
+struct Shop { stock: i64, next_id: i64 }
+fn reserve(cx: Shop&, item: const u8[:]) -> bool {
+    if cx.stock == 0 { return false; }
+    cx.stock -= 1;
+    return true;
+}
+fn charge(cx: Shop&, user: const u8[:], cents: i64) -> i64 {
+    cx.next_id += 1;
+    write_stderr(str("goose shop: charged ", user, " ", cents, " cents\n"));
+    return cx.next_id;
+}
+fn log(cx: Shop&, line: const u8[:]) { write_stderr(str("goose shop: ", line, "\n")); }
+
+fn main() {
+    let mode = if arg_count() > 1 { args()[1] } else { "" };
+    var wire = OkayWire { };
+    if mode == "guest" {
+        okay_wire_done(checkout(wire, "bob", "book", 2000));
+    } else if mode == "approvals" {
+        remote_approvals(wire, approvals(wire, 3));
+    } else if mode == "serve" {
+        var shop = Shop { stock: 1, next_id: 100 };
+        okay_serve(shop);
+    } else {
+        write_stderr("usage: wire guest | approvals | serve\n");
+    }
+}

@@ -113,6 +113,28 @@ handler's for that rest (`count_paths`). Checked: a clause for every once/many o
 arguments and the rest; no clause for a tail operation (the context answers those); a ONCE effect's rest resumed at
 most once — one `resume`, not in a loop, `k` used by it alone. `examples/handlers.okg`.
 
+### Over the wire: effects across languages
+
+An effect declared `wire` crosses to another language — okay's wire: an operation a name and a record, its answer a
+plain value, a line of JSON a message on stdin and stdout (`{"op":"charge","args":{"user":"bob","cents":2000}}`,
+answered `{"ok":7001}` or `{"fail":"…"}`; a program's end `{"done":…}`). okgc writes, for each operation,
+`okay_wire_<op>` (asked of the host); the context `OkayWire` (every tail operation the host's); `okay_serve(cx)` (the
+operations of a program elsewhere answered by `cx`); and for a resumable fn `remote_<name>` (its stops the host's).
+
+```
+effect Pay: wire { charge(user: const u8[:], cents: i64) -> i64; }
+effect Approve: once, wire { approve(cents: i64) -> bool; }
+
+okay_wire_done(checkout(OkayWire { }, "bob", "book", 2000));   // a guest: the host answers its effects
+remote_approvals(wire, approvals(wire, 3));                   // a resumable fn's stops answered by the host
+okay_serve(Shop { stock: 1, next_id: 100 });                  // the shop answering another language's program
+```
+
+`hosts/rust` runs all three against okay-rust: a Goose checkout answered by Rust handlers (okay-rust's
+`okay::wire::serve`), a Goose resumable fn's stops answered by Rust, and a Rust checkout handed out (`okay::host`)
+answered by the Goose shop — the effects declared on both sides by the same names and fields (`effect! { … wire … }`
+in Rust). v1 crosses `i64`, `bool`, `f64` and strings as arguments, and `i64`, `bool`, `f64` or nothing as answers.
+
 ## Layout
 
 - `src/okgc.goose` — the front end
@@ -126,6 +148,7 @@ most once — one `resume`, not in a loop, `k` used by it alone. `examples/handl
 - `proto/01_context.goose` — effects as overloads on a context, an interceptor, an aborting handler
 - `proto/02_machine.goose` — a machine: defunctionalized frames, `among` taking `k`, the `all` handler resuming it
   for each alternative; `k` as bytes and back
+- `examples/wire.okg`, `hosts/rust` — effects over okay's wire: Goose and Rust answering each other
 - `bench/lanes.okg`, `bench/results.md` — lanes against okay-rust and Scala
 - `tests/run.sh` — builds okgc, runs everything, compares with `tests/expected`
 

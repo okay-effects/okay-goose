@@ -1,0 +1,14 @@
+1. a Goose checkout, Rust's handlers:
+  goose asks: reserve Dict([("item", Str("book"))])
+  goose asks: charge Dict([("user", Str("bob")), ("cents", Int(2000))])
+  goose asks: log Dict([("line", Str("paid"))])
+  rust log: paid
+   its value: Int(7001)
+2. a Goose resumable fn, its stops answered by Rust:
+  goose asks: approve Dict([("cents", Int(100))])
+  goose asks: approve Dict([("cents", Int(200))])
+  goose asks: approve Dict([("cents", Int(300))])
+   approved: Int(2)
+3. a Rust checkout, the Goose shop's handlers:
+   ann's book: Ok(101)
+   bob's book: Ok(-1)

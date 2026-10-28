@@ -34,7 +34,7 @@ struct OpDecl { effect: i64, name: Span, params: Span, ret: Span }      // ret.l
 let TAIL = 0;
 let ONCE = 1;
 let MANY = 2;
-struct EffDecl { name: Span, kind: i64, first_op: i64, n_ops: i64, from: i64, to: i64 }
+struct EffDecl { name: Span, kind: i64, wire: bool, first_op: i64, n_ops: i64, from: i64, to: i64 }
 struct MVar { name: Span, ty: Span }                 // a variable a resumable fn's rest may need: a frame's field
 // a resumable fn's stop: the operation, the name its value is bound to (len 0: none), its arguments' parentheses,
 // the statement's tokens, the variables known before it (vars[..nvars]: the frame's fields)
@@ -196,12 +196,20 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
         let name_i = next(from + 1);
         var open = next(name_i + 1);
         var kind = TAIL;
+        var wire = false;
         if is_punct(open, ':') {
-            let k = next(open + 1);
-            if is_word(k, "once") { kind = ONCE; }
-            else if is_word(k, "many") { kind = MANY; }
-            else if !is_word(k, "tail") { error_at(toks[k].at, "an effect's kind is `tail`, `once` or `many`"); }
-            open = next(k + 1);
+            // its kind and `wire`, in any order: `effect Pay: once, wire { … }`
+            var k = next(open + 1);
+            loop {
+                if is_word(k, "once") { kind = ONCE; }
+                else if is_word(k, "many") { kind = MANY; }
+                else if is_word(k, "wire") { wire = true; }
+                else if !is_word(k, "tail") { error_at(toks[k].at, "an effect is `tail`, `once` or `many`, and may be `wire`"); }
+                k = next(k + 1);
+                if is_punct(k, ',') { k = next(k + 1); continue; }
+                break;
+            }
+            open = k;
         }
         guard toks[name_i].kind == K_IDENT && is_punct(open, '{') else {
             error_at(toks[from].at, "expected `effect Name { … }`");
@@ -236,7 +244,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             ops.push(OpDecl { effect: e, name: span_of(op_name), params: params, ret: ret });
             i = next(semi + 1);
         }
-        effs.push(EffDecl { name: span_of(name_i), kind: kind, first_op: first, n_ops: ops.len - first, from: from, to: close });
+        effs.push(EffDecl { name: span_of(name_i), kind: kind, wire: wire, first_op: first, n_ops: ops.len - first, from: from, to: close });
         return close + 1;
     }
 
@@ -1295,6 +1303,28 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             }
             format(mout, " return run_", n, "(cx, f); }\n");
         }
+        // over the wire: every stop's operation asked of the host, the program's value sent at its end
+        var all_wire = true;
+        for o in ops.len { if used(o) && !effs[ops[o].effect].wire { all_wire = false; } }
+        if all_wire {
+            format(mout, "fn remote_", n, "<OkayCx>(cx: OkayCx&, start: ", pname, ") {\n    var step = start;\n    loop {\n        match step {\n");
+            format(mout, "            Done okay_d => { okay_wire_done(");
+            if has_ret { format(mout, "okay_d.v"); }
+            format(mout, "); return; },\n");
+            for o in ops.len {
+                if !used(o) { continue; }
+                let op = ops[o];
+                format(mout, "            ");
+                cap_to(mout, text(op.name));
+                format(mout, " okay_o => { ");
+                if op.ret.len > 0 { format(mout, "step = resume(cx, okay_o.k, okay_wire_", text(op.name), "("); }
+                else { format(mout, "okay_wire_", text(op.name), "("); }
+                var f3 = true;
+                each_param(op.params) { pn, ty => if !f3 { format(mout, ", "); } f3 = false; format(mout, "okay_o.", pn); };
+                if op.ret.len > 0 { format(mout, ")); },\n"); } else { format(mout, "); step = resume(cx, okay_o.k); },\n"); }
+            }
+            format(mout, "        }\n    }\n}\n");
+        }
     }
 
     fn copy_plain(from: i64, to: i64) { for t in from..to + 1 { mout.append(tok_text(t)); } }
@@ -1392,6 +1422,145 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
         format(mout, "        }\n    }\n}\n");
     }
 
+    // OVER THE WIRE: an effect declared `wire` crosses to another language — okay's wire, a line of JSON a message
+    // on stdin and stdout: `{"op":"charge","args":{"user":"bob","cents":2000}}`, answered `{"ok":…}` or
+    // `{"fail":"…"}`; a program's end `{"done":…}`. Written out for each operation `okay_wire_<op>` (asked of the host),
+    // the context `OkayWire` (every tail operation the host's), `okay_serve(cx)` (operations of a program elsewhere
+    // answered by cx), and for a resumable fn `remote_<name>` (its stops answered by the host)
+    var wout: u8[>..] = [];
+
+    fn wire_kind(ty: u8[:]) -> i64 {
+        // 0 none, 1 i64, 2 bool, 3 f64, 4 a string
+        if ty.len == 0 || ty == "()" { return 0; }
+        if ty == "i64" { return 1; }
+        if ty == "bool" { return 2; }
+        if ty == "f64" { return 3; }
+        if find(ty, "u8[") >= 0 { return 4; }
+        return -1;
+    }
+    fn json_write(buf: u8[>..]&, kind: i64, expr: u8[:]) {
+        if kind == 1 { format(buf, "json::format_int(okay_line, ", expr, ");"); }
+        else if kind == 2 { format(buf, "json::format_bool(okay_line, ", expr, ");"); }
+        else if kind == 3 { format(buf, "json::format_number(okay_line, ", expr, ");"); }
+        else if kind == 4 { format(buf, "json::format_string(okay_line, ", expr, ");"); }
+        else { format(buf, "okay_line.append(\"null\");"); }
+    }
+    fn json_read(buf: u8[>..]&, kind: i64) {
+        if kind == 1 { format(buf, "json::read_int(okay_r)"); }
+        else if kind == 2 { format(buf, "json::read_bool(okay_r)"); }
+        else if kind == 3 { format(buf, "json::read_number(okay_r)"); }
+        else { format(buf, "json::read_string(okay_r, okay_scratch)"); }
+    }
+
+    fn write_wire() {
+        var any = false;
+        for e in effs { if e.wire { any = true; } }
+        if !any { return; }
+        format(wout, "\n// over the wire: okay's, a line of JSON a message on stdin and stdout\nimport json;\nimport os;\n");
+        format(wout, "fn okay_send(okay_line: u8[:]) { write_stdout(okay_line); write_stdout(\"\\n\"); flush_stdout(); }\n");
+        // the done message, by the value's type
+        format(wout, "fn okay_wire_done() { okay_send(\"{\\\"done\\\":null}\"); }\n");
+        for k in 1..4 {
+            let ty = if k == 1 { "i64" } else if k == 2 { "bool" } else { "f64" };
+            format(wout, "fn okay_wire_done(v: ", ty, ") { var okay_line: u8[>..] = []; okay_line.append(\"{\\\"done\\\":\"); ");
+            json_write(wout, k, "v");
+            format(wout, " okay_line.push('}'); okay_send(okay_line); }\n");
+        }
+        format(wout, "struct OkayWire { }\n");
+        for e in effs {
+            if !e.wire { continue; }
+            for o in e.first_op..e.first_op + e.n_ops {
+                let op = ops[o];
+                let rk = wire_kind(text(op.ret));
+                if rk < 0 || rk == 4 {
+                    error_at(op.name.at, str("`", text(op.name), "` over the wire answers i64, bool, f64 or nothing (v1)"));
+                    continue;
+                }
+                // asked of the host
+                format(wout, "fn okay_wire_", text(op.name), "(", text(op.params), ")");
+                if rk > 0 { format(wout, " -> ", text(op.ret)); }
+                format(wout, " {\n    var okay_line: u8[>..] = [];\n    okay_line.append(\"{\\\"op\\\":\\\"", text(op.name), "\\\",\\\"args\\\":{\");\n");
+                var first = true;
+                each_param(op.params) { pn, ty =>
+                    let pk = wire_kind(ty);
+                    if pk <= 0 { error_at(op.name.at, str("`", pn, "`: over the wire a parameter is i64, bool, f64 or a string (v1)")); }
+                    format(wout, "    ");
+                    if !first { format(wout, "okay_line.push(','); "); }
+                    first = false;
+                    format(wout, "json::format_key(okay_line, \"", pn, "\"); ");
+                    json_write(wout, pk, pn);
+                    format(wout, "\n");
+                };
+                format(wout, "    okay_line.append(\"}}\");\n    okay_send(okay_line);\n    var okay_reply: u8[>..] = [];\n");
+                format(wout, "    guard read_line(okay_reply) else { abort(\"okay wire: the host is gone\"); }\n");
+                format(wout, "    var okay_r = json::reader(okay_reply);\n    var okay_scratch: u8[>..] = [];\n");
+                if rk > 0 { format(wout, "    var okay_v = default<", text(op.ret), ">();\n"); }
+                format(wout, "    json::each_member(okay_r) { okay_key =>\n        if okay_key == \"ok\" { ");
+                if rk > 0 { format(wout, "okay_v = "); json_read(wout, rk); format(wout, ";"); } else { format(wout, "json::skip(okay_r);"); }
+                format(wout, " }\n        else if okay_key == \"fail\" { abort(str(\"okay wire: \", json::read_string(okay_r, okay_scratch))); }\n");
+                format(wout, "        else { json::skip(okay_r); }\n    };\n");
+                if rk > 0 { format(wout, "    return okay_v;\n"); }
+                format(wout, "}\n");
+                // the context answering by the host
+                if e.kind == TAIL {
+                    format(wout, "fn ", text(op.name), "(cx: OkayWire&");
+                    if op.params.len > 0 { format(wout, ", ", text(op.params)); }
+                    format(wout, ")");
+                    if rk > 0 { format(wout, " -> ", text(op.ret)); }
+                    format(wout, " { ");
+                    if rk > 0 { format(wout, "return "); }
+                    format(wout, "okay_wire_", text(op.name), "(");
+                    var f2 = true;
+                    each_param(op.params) { pn, ty => if !f2 { format(wout, ", "); } f2 = false; format(wout, pn); };
+                    format(wout, "); }\n");
+                }
+            }
+        }
+        // serving: the operations of a program elsewhere, each answered by cx
+        format(wout, "fn okay_serve<OkayCx>(cx: OkayCx&) {\n    var okay_in: u8[>..] = [];\n    while read_line(okay_in) {\n");
+        format(wout, "        var okay_r = json::reader(okay_in);\n        var okay_scratch: u8[>..] = [];\n        var okay_name: u8[..64] = [];\n");
+        format(wout, "        json::each_member(okay_r) { okay_key =>\n            if okay_key == \"op\" { okay_name.append(json::read_string(okay_r, okay_scratch)); }\n");
+        format(wout, "            else if okay_key == \"args\" {\n");
+        var first_op = true;
+        for e in effs {
+            if !e.wire || e.kind != TAIL { continue; }
+            for o in e.first_op..e.first_op + e.n_ops {
+                let op = ops[o];
+                let rk = wire_kind(text(op.ret));
+                format(wout, "                ");
+                if !first_op { format(wout, "else "); }
+                first_op = false;
+                format(wout, "if okay_name == \"", text(op.name), "\" {\n");
+                // a string argument copied out of the line (its parameter a slice of it, for the call)
+                each_param(op.params) { pn, ty =>
+                    if wire_kind(ty) == 4 { format(wout, "                    var ", pn, ": u8[..4096] = [];\n"); }
+                    else { format(wout, "                    var ", pn, ": ", ty, " = default<", ty, ">();\n"); }
+                };
+                format(wout, "                    var okay_s2: u8[>..] = [];\n");
+                format(wout, "                    json::each_member(okay_r) { okay_k =>\n                        if false { }\n");
+                each_param(op.params) { pn, ty =>
+                    let pk = wire_kind(ty);
+                    format(wout, "                        else if okay_k == \"", pn, "\" { ");
+                    if pk == 4 { format(wout, pn, ".append(json::read_string(okay_r, okay_s2))"); }
+                    else { format(wout, pn, " = "); json_read(wout, pk); }
+                    format(wout, "; }\n");
+                };
+                format(wout, "                        else { json::skip(okay_r); }\n                    };\n");
+                format(wout, "                    var okay_line: u8[>..] = [];\n                    okay_line.append(\"{\\\"ok\\\":\");\n");
+                var call: u8[>..] = [];
+                format(call, text(op.name), "(cx");
+                each_param(op.params) { pn, ty => format(call, ", ", pn); };
+                format(call, ")");
+                if rk > 0 { format(wout, "                    let okay_v = ", call, ";\n                    "); json_write(wout, rk, "okay_v"); }
+                else { format(wout, "                    ", call, "; okay_line.append(\"null\");"); }
+                format(wout, "\n                    okay_line.push('}');\n                    okay_send(okay_line);\n                }\n");
+            }
+        }
+        if !first_op { format(wout, "                else { okay_send(\"{\\\"fail\\\":\\\"no such operation\\\"}\"); json::skip(okay_r); }\n"); }
+        else { format(wout, "                json::skip(okay_r);\n"); }
+        format(wout, "            }\n            else { json::skip(okay_r); }\n        };\n        okay_in.resize(0);\n    }\n}\n");
+    }
+
     fn write_out() {
         var i = 0;
         while i < toks.len {
@@ -1469,8 +1638,10 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
     lex();
     parse();
     check();
+    write_wire();
     write_out();          // even with errors: the resumable fns are analysed there, their errors reported too
     if errors > 0 { return false; }
+    mout.append(wout);
     // the line map: the source's own lines as they are, each written-out part's its declaration's
     let base = out.len;
     var line = 1;

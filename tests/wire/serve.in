@@ -1,0 +1,4 @@
+{"op":"reserve","args":{"item":"book"}}
+{"op":"charge","args":{"user":"ann","cents":300}}
+{"op":"reserve","args":{"item":"pen"}}
+{"op":"nope","args":{}}

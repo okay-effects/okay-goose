@@ -26,6 +26,15 @@ done
 # okgc run: the compiler's message on a line of a resumable fn, named by the source's line
 GOOSE="$goose" build/okgc run tests/mapped_error.okg > build/mapped_error.out 2>&1
 check mapped_error build/mapped_error.out
+# over the wire: the three ways, the other side's lines given; and against okay-rust's host when it is beside
+GOOSE="$goose" build/okgc build examples/wire.okg -o build/wire > /dev/null 2>&1
+for m in guest approvals serve; do build/wire $m < tests/wire/$m.in > build/wire_$m.out 2>/dev/null; check wire_$m build/wire_$m.out; done
+if [ -d ../okay-rust ] && command -v cargo > /dev/null; then
+    (cd hosts/rust && cargo build -q 2> /dev/null && ./target/debug/okay-goose-host ../../build/wire > ../../build/wire_host.out 2> /dev/null)
+    check wire_host build/wire_host.out
+else
+    echo "skip wire_host (no ../okay-rust)"
+fi
 build/okgc tests/bad_handlers.okg build/bh.goose > build/bad_handlers.out 2>&1
 check bad_handlers build/bad_handlers.out
 build/okgc tests/bad_resumable.okg build/bad_resumable.goose > build/bad_resumable.out 2>&1
