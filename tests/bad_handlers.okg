@@ -12,3 +12,17 @@ handler wrong for Choose + Log -> i64 {
     flip(k) { resume(k, true) }
     log(line, k) { resume(k) }                          // a tail operation: the context's
 }
+
+effect Yield: once { emit(v: i64); }
+handler twice for Yield {
+    return() { }
+    emit(v, k) { resume(k); resume(k); }                // a once rest resumed twice
+}
+handler looped for Yield {
+    return() { }
+    emit(v, k) { for i in 2 { resume(k); } }            // in a loop
+}
+handler kept for Yield(saved: i64&) {
+    return() { }
+    emit(v, k) { let copy = k; resume(k); }             // the rest used besides its resume
+}

@@ -483,6 +483,46 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                     }
                 }
                 if !found { error_at(toks[from].at, str("handler `", tok_text(name_i), "` has no clause for `", text(ops[o].name), "`")); }
+                // ONCE: the rest resumed at most once — one `resume`, not in a loop, `k` used by it alone
+                if ef.kind == ONCE {
+                    for q in h.first..h.first + h.n {
+                        let c = clauses[q];
+                        if c.op != o || c.n_names == 0 { continue; }
+                        let kname = text(cnames[c.first_name + c.n_names - 1]);
+                        var resumes = 0;
+                        var k_uses = 0;
+                        var depth = 0;
+                        var loop_depths: i64[..16] = [];
+                        var pending = false;
+                        for t in c.open..c.close + 1 {
+                            if is_word(t, "for") || is_word(t, "while") || is_word(t, "loop") { pending = true; }
+                            if is_punct(t, '{') {
+                                depth++;
+                                if pending && loop_depths.len < 16 { loop_depths.push(depth); pending = false; }
+                            }
+                            if is_punct(t, '}') {
+                                if loop_depths.len > 0 && loop_depths[loop_depths.len - 1] == depth { loop_depths.resize(loop_depths.len - 1); }
+                                depth--;
+                            }
+                            if toks[t].kind == K_IDENT && tok_text(t) == kname { k_uses++; }
+                            if is_word(t, "resume") && is_punct(next(t + 1), '(') {
+                                resumes++;
+                                if loop_depths.len > 0 {
+                                    error_at(toks[t].at, str("`", text(ops[o].name), "` is of a once effect (",
+                                        text(ef.name), "): its rest is not resumed in a loop"));
+                                }
+                            }
+                        }
+                        if resumes > 1 {
+                            error_at(toks[c.open].at, str("`", text(ops[o].name), "` is of a once effect (", text(ef.name),
+                                "): its rest is resumed at most once, here ", resumes, " times"));
+                        }
+                        if k_uses > resumes {
+                            error_at(toks[c.open].at, str("`", text(ops[o].name), "` is of a once effect (", text(ef.name),
+                                "): its rest `", kname, "` is used only by its `resume`"));
+                        }
+                    }
+                }
             }
         }
         return close + 1;
