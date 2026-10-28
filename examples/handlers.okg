@@ -1,0 +1,63 @@
+// Handlers declared: one function for the steps of any machine fn with their effects. `resume(k, x)` last in a
+// clause goes on in a loop (no stack); anywhere else it runs the handler on the rest and is its value there.
+
+effect Choose: many { among(n: i64) -> i64; }
+effect Yield: once { emit(v: i64); }
+effect Log { log(line: u8[:]); }
+
+machine fn pair() -> i64 ! Choose + Log {
+    let a = among(3);
+    log("a chosen");
+    let b = among(2);
+    return a * 10 + b;
+}
+
+machine fn numbers(n: i64) ! Yield {
+    for i in 0..n { emit(i); }
+}
+
+// every path's value
+handler all for Choose(out: i64[>..]&) {
+    return(v) { out.push(v); }
+    among(n, k) { for i in n { resume(k, i); } }
+}
+
+// the first path's value: the rest resumed once, last — a loop
+handler first for Choose -> i64 {
+    return(v) { v }
+    among(n, k) { resume(k, 0) }
+}
+
+// how many paths: each rest's count summed — resume not last, so the handler runs on each rest
+handler count_paths for Choose -> i64 {
+    return(v) { 1 }
+    among(n, k) {
+        var s: i64 = 0;
+        for i in n { s += resume(k, i); }
+        s
+    }
+}
+
+// a generator's values summed: resume last, so a million values take no stack
+handler sum for Yield(total: i64&) {
+    return() { }
+    emit(v, k) {
+        total += v;
+        resume(k);
+    }
+}
+
+struct Console { lines: i64 }
+fn log(cx: Console&, line: u8[:]) { cx.lines += 1; }
+
+fn main() {
+    var c = Console { lines: 0 };
+    var out: i64[>..] = [];
+    all(c, pair(c), out);
+    print("all: ", out, ", logged ", c.lines);
+    print("first: ", first(c, pair(c)));
+    print("paths: ", count_paths(c, pair(c)));
+    var total = 0;
+    sum(c, numbers(c, 1000000), total);
+    print("sum of a million: ", total);
+}

@@ -1,0 +1,14 @@
+effect Choose: many { among(n: i64) -> i64; flip() -> bool; }
+effect Log { log(line: u8[:]); }
+
+handler missing for Choose -> i64 {                     // no clause for flip
+    return(v) { v }
+    among(n, k) { resume(k, 0) }
+}
+
+handler wrong for Choose + Log -> i64 {
+    return(v) { v }
+    among(k) { resume(k, 0) }                           // among's argument not named
+    flip(k) { resume(k, true) }
+    log(line, k) { resume(k) }                          // a tail operation: the context's
+}

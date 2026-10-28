@@ -1,4 +1,4 @@
 tests/bad_machine.okg:3: error: `among` keeps the rest of the program (Choose is not tail): it is called in a machine fn
-tests/bad_machine.okg:6: error: a machine fn stops at `let x = op(…);`: not inside an expression
+tests/bad_machine.okg:6: error: `among` inside a block of an expression: a machine fn stops there only as a statement of it
 tests/bad_machine.okg:11: error: `half` in a machine fn: its variables are the frame's fields — give it a type (`let half: T = …`)
 tests/bad_machine.okg:18: error: `a` declared twice in a machine fn: its variables are the frame's fields, one name each

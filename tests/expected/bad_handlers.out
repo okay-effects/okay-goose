@@ -1,0 +1,3 @@
+tests/bad_handlers.okg:4: error: handler `missing` has no clause for `flip`
+tests/bad_handlers.okg:13: error: `log` is a tail operation: the context answers it, not a handler of the rest
+tests/bad_handlers.okg:11: error: the clause of `among` names 1 argument(s) and the rest `k`

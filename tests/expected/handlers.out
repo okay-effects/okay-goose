@@ -1,0 +1,4 @@
+all: [0, 1, 10, 11, 20, 21], logged 3
+first: 0
+paths: 6
+sum of a million: 499999500000

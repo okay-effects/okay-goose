@@ -44,6 +44,10 @@ struct Fwd { ty: Span, field: Span, set: i64, first_ex: i64, n_ex: i64, from: i6
 // a function with effects: `fn name<…>(params) -> A ! F + G { body }` — its set (anonymous, named by its effects'
 // text), and the tokens the writer changes: after the name (or the generics' `>`) the context's type parameter, at
 // `(` the context, `! F + G` dropped, at `{` the check that the context has every operation
+// a handler: `handler name for F + G(params) -> R { return(v) { … } op(a, …, k) { … } }` — its clauses: the
+// return clause (op -1) and one per operation, each its names (the operation's arguments, then the rest) and body
+struct HDecl { name: Span, set: i64, params: Span, ret: Span, first: i64, n: i64, from: i64, to: i64 }
+struct Clause { op: i64, first_name: i64, n_names: i64, open: i64, close: i64 }
 struct FnDecl { name: Span, name_i: i64, set: i64, gt: i64, lp: i64, rp: i64, no_params: bool, bang_from: i64,
                 bang_to: i64, open: i64, close: i64, machine: bool, kw: i64, ret: Span }
 
@@ -60,6 +64,9 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
     var fwds: Fwd[>..] = [];
     var excepts: Span[>..] = [];
     var fns: FnDecl[>..] = [];
+    var hdecls: HDecl[>..] = [];
+    var clauses: Clause[>..] = [];
+    var cnames: Span[>..] = [];
     var errors = 0;
 
     fn text(s: Span) -> u8[:] { src[s.at..s.at + s.len] }
@@ -159,6 +166,28 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
     fn find_fn(s: Span) -> i64 {
         for f in fns.len { if text(fns[f].name) == text(s) { return f; } }
         return -1;
+    }
+
+    // the parameters' names and types, split at the commas outside brackets
+    fn each_param<F>(p: Span) {
+        var depth = 0;
+        var start = p.at;
+        for i in p.at..p.at + p.len + 1 {
+            let at_end = i == p.at + p.len;
+            if !at_end {
+                let c = src[i];
+                if c == '[' || c == '<' || c == '(' { depth++; }
+                if c == ']' || c == '>' || c == ')' { depth--; }
+            }
+            if at_end || (src[i] == ',' && depth == 0) {
+                let part = trim(src[start..i]);
+                if part.len > 0 {
+                    let colon = find(part, ":");
+                    F(trim(part[..colon]), trim(part[colon + 1..]));
+                }
+                start = i + 1;
+            }
+        }
     }
 
     // effect Name { op(params) -> ret; ... }
@@ -357,6 +386,108 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         return close + 1;
     }
 
+    // handler name for F + G(params) -> R { return(v) { … } op(a, …, k) { … } }
+    fn parse_handler(from: i64) -> i64 {
+        let name_i = next(from + 1);
+        let for_i = next(name_i + 1);
+        guard toks[name_i].kind == K_IDENT && is_word(for_i, "for") else {
+            error_at(toks[from].at, "expected `handler name for Effect { … }`");
+            return from + 1;
+        }
+        // the effects, then the parameters and the result
+        let first_m = members.len;
+        var e = next(for_i + 1);
+        var last = e;
+        loop {
+            let ef = find_effect(span_of(e));
+            let k = find_set(span_of(e));
+            if ef >= 0 { members.push(ef); }
+            else if k >= 0 { let st = sets[k]; for m in st.first..st.first + st.n { members.push(members[m]); } }
+            else { error_at(toks[e].at, str("no effect or set `", tok_text(e), "` declared before")); }
+            last = e;
+            let after = next(e + 1);
+            if is_punct(after, '+') { e = next(after + 1); continue; }
+            e = after;
+            break;
+        }
+        let set = sets.len;
+        sets.push(SetDecl { name: Span { at: toks[next(for_i + 1)].at, len: toks[last].at + toks[last].len - toks[next(for_i + 1)].at },
+                            first: first_m, n: members.len - first_m, from: -1, to: -1 });
+        var params = Span { at: 0, len: 0 };
+        if is_punct(e, '(') {
+            let rp = closing(e, '(', ')');
+            params = Span { at: toks[e].at + 1, len: toks[rp].at - toks[e].at - 1 };
+            e = next(rp + 1);
+        }
+        var ret = Span { at: 0, len: 0 };
+        if is_punct(e, '-') && is_punct(e + 1, '>') {
+            let r0 = next(e + 2);
+            var r = r0;
+            while r < toks.len && !is_punct(r, '{') { r++; }
+            var lr = r - 1;
+            while lr > r0 && toks[lr].kind == K_SPACE { lr--; }
+            ret = Span { at: toks[r0].at, len: toks[lr].at + toks[lr].len - toks[r0].at };
+            e = r;
+        }
+        guard is_punct(e, '{') else { error_at(toks[from].at, "expected `{` and the handler's clauses"); return e + 1; }
+        let close = closing(e, '{', '}');
+        let first_c = clauses.len;
+        var c = next(e + 1);
+        while c < close {
+            let lp = next(c + 1);
+            guard toks[c].kind == K_IDENT && is_punct(lp, '(') else {
+                error_at(toks[c].at, "expected a clause: `return(v) { … }` or `op(args, k) { … }`");
+                return close + 1;
+            }
+            let rp = closing(lp, '(', ')');
+            let ob = next(rp + 1);
+            guard is_punct(ob, '{') else { error_at(toks[c].at, "expected the clause's body `{ … }`"); return close + 1; }
+            let cb = closing(ob, '{', '}');
+            var op = -1;
+            if !is_word(c, "return") {
+                op = find_op(span_of(c));
+                if op < 0 || !set_has(set, ops[op].effect) {
+                    error_at(toks[c].at, str("`", tok_text(c), "` is no operation of the handler's effects"));
+                } else if effs[ops[op].effect].kind == TAIL {
+                    error_at(toks[c].at, str("`", tok_text(c), "` is a tail operation: the context answers it, not a handler of the rest"));
+                }
+            }
+            let first_n = cnames.len;
+            var t = next(lp + 1);
+            while t < rp {
+                if toks[t].kind == K_IDENT { cnames.push(span_of(t)); }
+                t = next(t + 1);
+            }
+            clauses.push(Clause { op: op, first_name: first_n, n_names: cnames.len - first_n, open: ob, close: cb });
+            c = next(cb + 1);
+        }
+        hdecls.push(HDecl { name: span_of(name_i), set: set, params: params, ret: ret, first: first_c,
+                            n: clauses.len - first_c, from: from, to: close });
+        // a clause for every once/many operation, with its arguments and its rest named
+        let h = hdecls[hdecls.len - 1];
+        let st = sets[set];
+        for m in st.first..st.first + st.n {
+            let ef = effs[members[m]];
+            if ef.kind == TAIL { continue; }
+            for o in ef.first_op..ef.first_op + ef.n_ops {
+                var found = false;
+                for q in h.first..h.first + h.n {
+                    if clauses[q].op == o {
+                        found = true;
+                        var np = 0;
+                        each_param(ops[o].params) { pn, ty => np++; };
+                        if clauses[q].n_names != np + 1 {
+                            error_at(toks[clauses[q].open].at, str("the clause of `", text(ops[o].name), "` names ",
+                                np, " argument(s) and the rest `k`"));
+                        }
+                    }
+                }
+                if !found { error_at(toks[from].at, str("handler `", tok_text(name_i), "` has no clause for `", text(ops[o].name), "`")); }
+            }
+        }
+        return close + 1;
+    }
+
     // the top level: the four forms found, everything else passed by
     fn parse() {
         var i = next(0);
@@ -364,6 +495,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             if is_word(i, "effect") { i = next(parse_effect(i)); }
             else if is_word(i, "effects") { i = next(parse_set(i)); }
             else if is_word(i, "forward") { i = next(parse_forward(i)); }
+            else if is_word(i, "handler") { i = next(parse_handler(i)); }
             else if is_word(i, "machine") && is_word(next(i + 1), "fn") { i = next(parse_fn(next(i + 1), true, i)); }
             else if is_word(i, "fn") || is_word(i, "recursive") {
                 let f = if is_word(i, "recursive") { next(i + 1) } else { i };
@@ -415,27 +547,6 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
     // WRITING
     var out: u8[>..] = [];
 
-    // the parameters' names and types, split at the commas outside brackets
-    fn each_param<F>(p: Span) {
-        var depth = 0;
-        var start = p.at;
-        for i in p.at..p.at + p.len + 1 {
-            let at_end = i == p.at + p.len;
-            if !at_end {
-                let c = src[i];
-                if c == '[' || c == '<' || c == '(' { depth++; }
-                if c == ']' || c == '>' || c == ')' { depth--; }
-            }
-            if at_end || (src[i] == ',' && depth == 0) {
-                let part = trim(src[start..i]);
-                if part.len > 0 {
-                    let colon = find(part, ":");
-                    F(trim(part[..colon]), trim(part[colon + 1..]));
-                }
-                start = i + 1;
-            }
-        }
-    }
 
     // every operation of the set the context answers (the tail ones: the others are the program's stops, answered
     // by what runs the machine) called on cx, never run: a context lacking one is an error here
@@ -514,6 +625,9 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         var loops: i64[>..<] = [];           // the lowered loops around: their break and continue labels, in pairs
         var body: u8[>..] = [];
         var syn: u8[>..] = [];               // made-up variables' names and types: a Span at -(offset + 1) is here
+        var rep_from: i64[>..] = [];         // a stop inside an expression: the call's tokens, the variable now there
+        var rep_to: i64[>..] = [];
+        var rep_var: i64[>..] = [];
         var labels = 1;
         var fresh_vars = 0;
         let n = text(d.name);
@@ -604,6 +718,13 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             var user_loops: i64[..16] = [];     // the brace depths of the loops inside the copied text
             var t = from;
             while t <= to && t < toks.len {
+                var replaced = -1;
+                for q in rep_from.len { if rep_from[q] == t { replaced = q; } }
+                if replaced >= 0 {
+                    vname(rep_var[replaced], body);
+                    t = rep_to[replaced] + 1;
+                    continue;
+                }
                 var passed = false;
                 for q in passes { if q == t { passed = true; } }
                 if passed {
@@ -754,6 +875,47 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             open(ln);
         }
 
+        // the stops inside an expression (from..to), innermost first, each before the statement, its value a made-up
+        // variable put in the call's place. Not inside a block of the expression: there it may not run at all
+        recursive fn extract(from: i64, to: i64) {
+            var t = from;
+            var brace = 0;
+            while t <= to && t < d.close {
+                if is_punct(t, '{') { brace++; }
+                if is_punct(t, '}') { brace--; }
+                let o = is_control(t, d.set);
+                let g = is_sub(t);
+                if (o >= 0 || g >= 0) && brace > 0 {
+                    error_at(toks[t].at, str("`", tok_text(t), "` inside a block of an expression: a machine fn stops ",
+                        "there only as a statement of it"));
+                    t++;
+                    continue;
+                }
+                if o >= 0 || g >= 0 {
+                    let lp = next(t + 1);
+                    let rp = closing(lp, '(', ')');
+                    extract(next(lp + 1), rp - 1);
+                    let ty = if o >= 0 { ops[o].ret } else { fns[g].ret };
+                    if ty.len == 0 {
+                        error_at(toks[t].at, str("`", tok_text(t), "` has no value to use in an expression"));
+                        t = rp + 1;
+                        continue;
+                    }
+                    var tname: u8[..32] = [];
+                    format(tname, "okay_t", fresh_vars);
+                    fresh_vars++;
+                    let v = synth(tname, text(ty));
+                    if o >= 0 { write_stop(o, v, lp, rp); } else { write_sub(g, v, lp, rp); }
+                    rep_from.push(t);
+                    rep_to.push(rp);
+                    rep_var.push(v);
+                    t = rp + 1;
+                    continue;
+                }
+                t++;
+            }
+        }
+
         // a let at a lowered level: the variable a frame field, the statement an assignment
         fn lower_let(j: i64, e: i64) {
             let name_i = next(j + 1);
@@ -783,10 +945,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                 write_sub(g, v, lp, closing(lp, '(', ')'));
                 return;
             }
-            if has_stop(j, e) {
-                error_at(toks[j].at, "a machine fn stops at `let x = op(…);`: not inside an expression");
-                return;
-            }
+            if has_stop(j, e) { extract(rhs, e - 1); }
             if ty.len == 0 {
                 error_at(toks[name_i].at, str("`", tok_text(name_i), "` in a machine fn: its variables are the frame's ",
                     "fields — give it a type (`let ", tok_text(name_i), ": T = …`)"));
@@ -822,6 +981,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                     let el = next(cb + 1);
                     let has_else = el <= e && is_word(el, "else");
                     let lb = if has_else { new_label() } else { lj };
+                    extract(next(j + 1), ob - 1);
                     format(body, " if (");
                     copy_tokens(next(j + 1), ob - 1, false);
                     format(body, ") { at = ", la, "; } else { at = ", lb, "; } continue; },\n            ");
@@ -845,6 +1005,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                     jump(lh);
                     open(lh);
                     if is_word(j, "while") {
+                        extract(next(j + 1), ob - 1);
                         format(body, " if (");
                         copy_tokens(next(j + 1), ob - 1, false);
                         format(body, ") { at = ", lb, "; } else { at = ", lx, "; } continue; },\n            ");
@@ -873,6 +1034,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                     format(endname, "okay_end", fresh_vars);
                     fresh_vars++;
                     synth(endname, "i64");
+                    extract(next(in_i + 1), ob - 1);
                     format(body, " ", tok_text(name_i), " = ");
                     if dots >= 0 { format(body, "("); copy_tokens(next(in_i + 1), dots - 1, false); format(body, ")"); }
                     else { format(body, "0"); }
@@ -899,8 +1061,20 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                     open(lx);
                 } else if is_punct(j, '{') {
                     lower(next(j + 1), closing(j, '{', '}') - 1);
+                } else if is_word(j, "match") {
+                    // the scrutinee's stops before it; a stop in an arm: not yet
+                    let ob = open_brace(next(j + 1));
+                    extract(next(j + 1), ob - 1);
+                    if has_stop(ob, e) {
+                        error_at(toks[j].at, "a stop inside a `match` arm: a machine fn stops in its body, in if, while, for and loop");
+                    }
+                    format(body, " ");
+                    copy_tokens(j, e, true);
                 } else {
-                    error_at(toks[j].at, "a stop inside this statement: a machine fn stops in its body, in if, while, for and loop");
+                    // an expression statement, a return: its stops before it
+                    extract(j, e);
+                    format(body, " ");
+                    copy_tokens(j, e, true);
                 }
                 j = next(e + 1);
             }
@@ -1014,6 +1188,99 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         }
     }
 
+    fn copy_plain(from: i64, to: i64) { for t in from..to + 1 { mout.append(tok_text(t)); } }
+
+    // A HANDLER: one function for the steps of any machine fn with its effects — a loop over the steps, a clause
+    // for each: `resume(k, x)` last in a clause the loop going on with the rest's next step (no stack), anywhere
+    // else this handler run on the rest — a deep handler — its value the handler's for that rest
+    fn write_handler(h: HDecl) {
+        let hn = text(h.name);
+        let has_ret = h.ret.len > 0;
+        var pnames: u8[>..] = [];
+        each_param(h.params) { pn, ty => format(pnames, ", ", pn); };
+        // a clause's body: `resume(k, …)` rewritten; `tail_from`: the tail resume's token (-1: none)
+        fn copy_body(from: i64, to: i64, kname: u8[:], tail_at: i64) {
+            var t = from;
+            while t <= to {
+                if is_word(t, "resume") && is_punct(next(t + 1), '(') {
+                    let lp = next(t + 1);
+                    let rp = closing(lp, '(', ')');
+                    let a = next(lp + 1);
+                    if t == tail_at { format(mout, "step = resume(cx, "); }
+                    else { format(mout, hn, "(cx, resume(cx, "); }
+                    copy_plain(a, rp - 1);
+                    if t == tail_at { format(mout, "); continue;"); }
+                    else { format(mout, ")", pnames, ")"); }
+                    t = rp + 1;
+                    // a tail resume's `;` is the loop's now
+                    if t - 1 == closing(next(tail_at + 1), '(', ')') && is_punct(next(t), ';') { t = next(t) + 1; }
+                    continue;
+                }
+                mout.append(tok_text(t));
+                t++;
+            }
+        }
+        // the last statement of a clause, if it is `resume(…)`: its token
+        fn tail_resume(c: Clause) -> i64 {
+            var e = c.close - 1;
+            while e > c.open && toks[e].kind == K_SPACE { e--; }
+            if is_punct(e, ';') { e--; while e > c.open && toks[e].kind == K_SPACE { e--; } }
+            guard is_punct(e, ')') else { return -1; }
+            // the call this `)` closes
+            var depth = 0;
+            var t = e;
+            while t > c.open {
+                if is_punct(t, ')') { depth++; }
+                if is_punct(t, '(') { depth--; if depth == 0 { break; } }
+                t--;
+            }
+            var name = t - 1;
+            while name > c.open && toks[name].kind == K_SPACE { name--; }
+            guard is_word(name, "resume") else { return -1; }
+            // it starts a statement: after `{`, `;` or `}`
+            var before = name - 1;
+            while before > c.open && toks[before].kind == K_SPACE { before--; }
+            if before == c.open || is_punct(before, ';') || is_punct(before, '}') { return name; }
+            return -1;
+        }
+        fn clause_end(c: Clause, tail: i64) {
+            if tail >= 0 { return; }
+            if has_ret { format(mout, " } "); } else { format(mout, " } return;"); }
+        }
+        format(mout, "\n// handler ", hn, " (", path, ":", line_of(toks[h.from].at), ")\n");
+        format(mout, "recursive fn ", hn, "<OkayCx, OkayStep>(cx: OkayCx&, start: OkayStep");
+        if h.params.len > 0 { format(mout, ", ", text(h.params)); }
+        format(mout, ")");
+        if has_ret { format(mout, " -> ", text(h.ret)); }
+        format(mout, " {\n    var step = start;\n    loop {\n        match step {\n");
+        for q in h.first..h.first + h.n {
+            let c = clauses[q];
+            let tail = tail_resume(c);
+            if c.op < 0 {
+                format(mout, "            Done okay_d => {");
+                if c.n_names > 0 { format(mout, " let ", text(cnames[c.first_name]), " = okay_d.v;"); }
+            } else {
+                let op = ops[c.op];
+                format(mout, "            ");
+                if text(op.name)[0] >= 'a' && text(op.name)[0] <= 'z' { mout.push(text(op.name)[0] - 32); } else { mout.push(text(op.name)[0]); }
+                mout.append(text(op.name)[1..]);
+                format(mout, " okay_o => {");
+                var i = 0;
+                each_param(op.params) { pn, ty =>
+                    if i < c.n_names { format(mout, " let ", text(cnames[c.first_name + i]), " = okay_o.", pn, ";"); }
+                    i++;
+                };
+                if c.n_names > 0 { format(mout, " let ", text(cnames[c.first_name + c.n_names - 1]), " = okay_o.k;"); }
+            }
+            if tail < 0 { if has_ret { format(mout, " return {"); } else { format(mout, " {"); } }
+            let kname = if c.n_names > 0 { text(cnames[c.first_name + c.n_names - 1]) } else { "" };
+            copy_body(next(c.open + 1), c.close - 1, kname, tail);
+            clause_end(c, tail);
+            format(mout, " },\n");
+        }
+        format(mout, "        }\n    }\n}\n");
+    }
+
     fn write_out() {
         var i = 0;
         while i < toks.len {
@@ -1035,6 +1302,14 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             }
             for w in fwds.len {
                 if !done && i == fwds[w].from { write_forward(fwds[w]); i = fwds[w].to + 1; done = true; }
+            }
+            for h in hdecls {
+                if !done && i == h.from {
+                    for t in h.from..h.to + 1 { for c in tok_text(t) { if c == '\n' { out.push('\n'); } } }
+                    write_handler(h);
+                    i = h.to + 1;
+                    done = true;
+                }
             }
             for f in fns.len {
                 let d = fns[f];

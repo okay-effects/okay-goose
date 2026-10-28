@@ -78,8 +78,31 @@ operation's), one name each.
 
 A machine fn calls a machine fn as a statement (`let x = range(0, 3);`): the callee's steps pass out as the
 caller's — its rest kept in the caller's frame, a field —, its value bound when it is done; resumed, the value goes
-to the callee (`examples/nested.okg`: a generator delegating to another, a choice made in a callee). Not yet: a stop
-inside an expression or a `match`.
+to the callee (`examples/nested.okg`: a generator delegating to another, a choice made in a callee).
+
+A stop inside an expression is taken out before its statement — left to right, innermost first —, its value a
+made-up variable in the call's place: in a `let`, an `if`'s condition, a `while`'s (asked again at each turn), a
+`for`'s range, a `return`, a `match`'s scrutinee (`examples/expressions.okg`). Not inside a block of an expression
+(an `if` as a value, a `match` arm): there it may not run at all.
+
+### Handlers declared
+
+```
+handler all for Choose(out: i64[>..]&) {
+    return(v) { out.push(v); }
+    among(n, k) { for i in n { resume(k, i); } }
+}
+handler count_paths for Choose -> i64 {
+    return(v) { 1 }
+    among(n, k) { var s: i64 = 0; for i in n { s += resume(k, i); } s }
+}
+```
+
+One function for the steps of ANY machine fn with those effects (`all(cx, pair(cx), out)`): a loop over the steps,
+a clause for each. `resume(k, x)` last in a clause goes on in the loop — no stack: a generator of a million values
+is summed in constant stack —; anywhere else it runs the handler on the rest, a deep handler, its value the
+handler's for that rest (`count_paths`). Checked: a clause for every once/many operation, each naming its
+arguments and the rest; no clause for a tail operation (the context answers those). `examples/handlers.okg`.
 
 ## Layout
 
@@ -88,6 +111,8 @@ inside an expression or a `match`.
 - `examples/choose.okg` — a machine fn: all paths, the first, a step saved as bytes and resumed
 - `examples/loops.okg` — a generator pulled value by value; a search whose `while` stops at each guess
 - `examples/nested.okg` — machine fns calling machine fns: a generator delegating, a choice in a callee
+- `examples/handlers.okg` — handlers declared: all paths, the first, the number of paths, a million values summed
+- `examples/expressions.okg` — stops inside expressions: a quiz asking its host, numbers made of choices
 - `proto/01_context.goose` — effects as overloads on a context, an interceptor, an aborting handler
 - `proto/02_machine.goose` — a machine: defunctionalized frames, `among` taking `k`, the `all` handler resuming it
   for each alternative; `k` as bytes and back
@@ -100,7 +125,6 @@ tests/run.sh
 
 ## Next
 
-- machine fns: stops inside expressions and `match`; a recursive machine fn (a frame of itself needs a pool)
-- `abort` effects generated as `return … from`; handlers declared (`handler all for Choose { … }`) and written out
+- see BACKLOG.md for what is undecided or later
 - sensitive effects (needs okgc's own modules and privacy: Goose has none)
 - okgc rewritten in its own dialect, its diagnostics and tables as effects
