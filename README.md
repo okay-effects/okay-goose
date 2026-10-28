@@ -47,10 +47,36 @@ ON THE SAME LINES, so an error Goose reports in the output is at the source's li
 okgc input.okg output.goose
 ```
 
+### Machine fns: the rest as a value
+
+An effect's kind says what its handlers do with the rest: `tail` (the default) answers and goes on, `once` and
+`many` keep it. In a `machine fn` an operation of a `once`/`many` effect is where the program stops; okgc cuts it
+there, each rest a frame (a variant naming the stop, its fields the variables it needs), each piece a function.
+
+```
+effect Choose: many { among(n: i64) -> i64; }
+
+machine fn pick(base: i64) -> i64 ! Choose + Log {
+    let a = among(3);              // a stop: the rest kept
+    log("first chosen");           // a tail operation: the context answers it in place
+    let b = among(2);
+    let sum: i64 = base + A[a];    // a variable living across a stop has a type
+    return sum + B[b];
+}
+```
+
+Written out: `enum Pick { Done { v: i64 }, Among { n: i64, k: Pick_among } }`, the rests
+`enum Pick_among { At0 { base: i64 }, At1 { base: i64, a: i64 } }`, the first step `pick(cx, base)` and the others
+`resume(cx, k, v)` — by the frame's variant, `v` of the operation's type, no cast. A handler is plain code over the
+steps: `all` resumes a rest once for each alternative, `first` once. A step is flat: written out as bytes
+(`to_bytes`), it is resumed from them later or elsewhere (`examples/choose.okg`: 27 bytes). Not yet: stops inside
+`if` and loops, a machine fn calling a machine fn.
+
 ## Layout
 
 - `src/okgc.goose` — the front end
 - `examples/shop.okg` — the shop: effects, sets, `A ! F + G`, an interceptor with forwarding
+- `examples/choose.okg` — a machine fn: all paths, the first, a step saved as bytes and resumed
 - `proto/01_context.goose` — effects as overloads on a context, an interceptor, an aborting handler
 - `proto/02_machine.goose` — a machine: defunctionalized frames, `among` taking `k`, the `all` handler resuming it
   for each alternative; `k` as bytes and back
@@ -63,8 +89,7 @@ tests/run.sh
 
 ## Next
 
-- handlers classified by what they do with `k` (`tail`, `abort`, `once`, `many`) and the mechanism generated:
-  direct call, `return … from`, a state machine, the machine
-- the machine's frames generated from ordinary code (`machine fn … { a <- among(…); … }`)
+- machine fns: stops inside `if` and loops (labels as states), a machine fn calling a machine fn (a stack of frames)
+- `abort` effects generated as `return … from`; handlers declared (`handler all for Choose { … }`) and written out
 - sensitive effects (needs okgc's own modules and privacy: Goose has none)
 - okgc rewritten in its own dialect, its diagnostics and tables as effects

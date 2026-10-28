@@ -13,6 +13,10 @@ check() {  # name, actual output file
 "$goose" build src/okgc.goose -o build/okgc > /dev/null || { echo "FAIL okgc does not build"; exit 1; }
 build/okgc examples/shop.okg build/shop.goose && "$goose" build/shop.goose > build/shop.out 2>&1
 check shop build/shop.out
+build/okgc examples/choose.okg build/choose.goose && "$goose" build/choose.goose > build/choose.out 2>&1
+check choose build/choose.out
+build/okgc tests/bad_machine.okg build/bad_machine.goose > build/bad_machine.out 2>&1
+check bad_machine build/bad_machine.out
 build/okgc tests/bad_rows.okg build/bad.goose > build/bad_rows.out 2>&1
 check bad_rows build/bad_rows.out
 build/okgc tests/missing_op.okg build/missing.goose && "$goose" build/missing.goose > build/missing.out 2>&1
