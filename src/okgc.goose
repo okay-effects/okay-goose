@@ -96,7 +96,9 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                 while i < src.len && (is_alpha(src[i]) || is_digit(src[i])) { i++; }
                 toks.push(Tok { kind: K_IDENT, at: start, len: i - start });
             } else if is_digit(c) {
-                while i < src.len && (is_alpha(src[i]) || is_digit(src[i]) || src[i] == '.') { i++; }
+                // a dot is the number's only before a digit: `0..n` is a number and a range
+                while i < src.len && (is_alpha(src[i]) || is_digit(src[i])
+                                      || (src[i] == '.' && i + 1 < src.len && is_digit(src[i + 1]))) { i++; }
                 toks.push(Tok { kind: K_NUM, at: start, len: i - start });
             } else if c == '"' || c == '\'' {
                 i++;
@@ -492,10 +494,12 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         }
     }
 
-    // MACHINE FNS: the program cut at each operation that keeps the rest; each rest a frame — a variant naming where
-    // it stops, its fields the variables it needs —, each piece a function: the first `name(cx, …)`, the others
-    // `resume(cx, k, v)` by the frame's variant, `v` of the operation's type. Its steps a value: `Done`, or an
-    // operation with its arguments and its rest `k`, flat — copied to resume again, written out as bytes
+    // MACHINE FNS: a state machine. Its frame is one struct — where it stopped (`at`) and every variable of the
+    // function —; its body `loop { match at { … } }`, cut into blocks only where a statement holds a stop: a stop
+    // ends a block (its step returned, the rest a frame), an `if`, `while`, `for` or `loop` holding one becomes
+    // jumps between blocks; a statement holding none is copied as it is. Its steps a value: `Done`, or an operation
+    // with its arguments and its rest `k` — flat: copied to resume again, written out as bytes. The first step
+    // `name(cx, …)`, the others `resume(cx, k, v)`, by the operation's rest type, `v` of its type: no cast
     var mout: u8[>..] = [];
 
     fn is_control(i: i64, set: i64) -> i64 {
@@ -507,8 +511,302 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
 
     fn write_machine(d: FnDecl) {
         var vars: MVar[>..] = [];
-        var points: Point[>..] = [];
-        // the parameters: the first variables
+        var stop_at: i64[>..] = [];          // each stop: its block's label, its operation, the variable bound
+        var stop_op: i64[>..] = [];
+        var stop_bind: i64[>..] = [];
+        var loops: i64[>..<] = [];           // the lowered loops around: their break and continue labels, in pairs
+        var body: u8[>..] = [];
+        var labels = 1;
+        var fresh_vars = 0;
+        let n = text(d.name);
+        var pname: u8[>..] = [];
+        if n[0] >= 'a' && n[0] <= 'z' { pname.push(n[0] - 32); } else { pname.push(n[0]); }
+        pname.append(n[1..]);
+        let has_ret = d.ret.len > 0 && text(d.ret) != "()";
+
+        fn var_index(s: u8[:]) -> i64 {
+            for v in vars.len { if text(vars[v].name) == s { return v; } }
+            return -1;
+        }
+        fn add_var(name: Span, ty: Span) -> i64 {
+            if var_index(text(name)) >= 0 {
+                error_at(name.at, str("`", text(name), "` declared twice in a machine fn: its variables are the ",
+                    "frame's fields, one name each"));
+                return var_index(text(name));
+            }
+            vars.push(MVar { name: name, ty: ty });
+            return vars.len - 1;
+        }
+        fn has_stop(from: i64, to: i64) -> bool {
+            for t in from..to + 1 { if t < d.close && is_control(t, d.set) >= 0 { return true; } }
+            return false;
+        }
+        // the last token of the statement starting at j: its `;`, or the `}` ending it (an if's last branch)
+        fn stmt_end(j: i64, limit: i64) -> i64 {
+            var e = j;
+            var depth = 0;
+            loop {
+                if e >= limit { return limit; }
+                if is_punct(e, '{') || is_punct(e, '(') || is_punct(e, '[') { depth++; }
+                if is_punct(e, '}') || is_punct(e, ')') || is_punct(e, ']') {
+                    depth--;
+                    if depth == 0 && is_punct(e, '}') && !is_word(next(e + 1), "else") { return e; }
+                }
+                if depth == 0 && is_punct(e, ';') { return e; }
+                e++;
+            }
+        }
+        // the first `{` at depth 0 from i: where a condition ends
+        fn open_brace(i: i64) -> i64 {
+            var t = i;
+            var depth = 0;
+            while t < d.close {
+                if depth == 0 && is_punct(t, '{') { return t; }
+                if is_punct(t, '(') || is_punct(t, '[') { depth++; }
+                if is_punct(t, ')') || is_punct(t, ']') { depth--; }
+                t++;
+            }
+            return d.close;
+        }
+        fn new_label() -> i64 { labels += 1; return labels - 1; }
+        fn frame_mark(l: i64) { body.push(1); format(body, l); body.push(2); }
+
+        // tokens copied into the body: the context passed, `return x;` the program's Done; with `lowered`, a
+        // `break` or `continue` of the lowered loop around (not of a loop inside the copied text) a jump
+        fn copy_tokens(from: i64, to: i64, lowered: bool) {
+            var close_at = -1;
+            var depth = 0;
+            var pending = false;
+            var user_loops: i64[..16] = [];     // the brace depths of the loops inside the copied text
+            var t = from;
+            while t <= to && t < toks.len {
+                var passed = false;
+                for q in passes { if q == t { passed = true; } }
+                if passed {
+                    format(body, "(cx");
+                    if !is_punct(next(t + 1), ')') { format(body, ", "); }
+                    t++;
+                    continue;
+                }
+                if t == close_at { format(body, ") }"); close_at = -1; }
+                if is_word(t, "while") || is_word(t, "for") || is_word(t, "loop") { pending = true; }
+                if is_punct(t, '{') {
+                    depth++;
+                    if pending && user_loops.len < 16 { user_loops.push(depth); pending = false; }
+                }
+                if is_punct(t, '}') {
+                    if user_loops.len > 0 && user_loops[user_loops.len - 1] == depth { user_loops.resize(user_loops.len - 1); }
+                    depth--;
+                }
+                if lowered && user_loops.len == 0 && loops.len >= 2 && (is_word(t, "break") || is_word(t, "continue")) {
+                    let target = if is_word(t, "break") { loops[loops.len - 2] } else { loops[loops.len - 1] };
+                    format(body, "{ at = ", target, "; continue; }");
+                    t = next(t + 1);       // the `;`
+                    t++;
+                    continue;
+                }
+                if is_word(t, "return") {
+                    let v = next(t + 1);
+                    if is_punct(v, ';') { format(body, "return ", pname, ".Done {}"); t = v; continue; }
+                    format(body, "return ", pname, ".Done { v: (");
+                    var c = v;
+                    var dp = 0;
+                    while c < to && !(dp == 0 && is_punct(c, ';')) {
+                        if is_punct(c, '(') || is_punct(c, '[') || is_punct(c, '{') { dp++; }
+                        if is_punct(c, ')') || is_punct(c, ']') || is_punct(c, '}') { dp--; }
+                        c++;
+                    }
+                    close_at = c;
+                    t = v;
+                    continue;
+                }
+                body.append(tok_text(t));
+                t++;
+            }
+            if close_at >= 0 { format(body, ") }"); }
+        }
+
+        fn cap_to(buf: u8[>..]&, s: u8[:]) {
+            if s[0] >= 'a' && s[0] <= 'z' { buf.push(s[0] - 32); } else { buf.push(s[0]); }
+            buf.append(s[1..]);
+        }
+
+        // a stop: the step returned — the operation's arguments by its parameters' names, the rest a frame at a
+        // new label — and that label's block opened, where resume comes back
+        fn write_stop(o: i64, bind: i64, lp: i64, rp: i64) {
+            let l = new_label();
+            stop_at.push(l);
+            stop_op.push(o);
+            stop_bind.push(bind);
+            let op = ops[o];
+            format(body, " return ", pname, ".");
+            cap_to(body, text(op.name));
+            format(body, " { ");
+            var a = next(lp + 1);
+            each_param(op.params) { pn, ty =>
+                var e = a;
+                var dp = 0;
+                while e < rp && !(dp == 0 && is_punct(e, ',')) {
+                    if is_punct(e, '(') || is_punct(e, '[') { dp++; }
+                    if is_punct(e, ')') || is_punct(e, ']') { dp--; }
+                    e++;
+                }
+                format(body, pn, ": (");
+                copy_tokens(a, e - 1, false);
+                format(body, "), ");
+                a = if e < rp { next(e + 1) } else { rp };
+            };
+            format(body, "k: ", pname, "_", text(op.name), " { k: ");
+            frame_mark(l);
+            format(body, " } }; },\n            ", l, " => {");
+        }
+        fn jump(l: i64) { format(body, " at = ", l, "; continue; },\n            "); }
+        fn open(l: i64) { format(body, l, " => {"); }
+
+        // a let at a lowered level: the variable a frame field, the statement an assignment
+        fn lower_let(j: i64, e: i64) {
+            let name_i = next(j + 1);
+            var after = next(name_i + 1);
+            var ty = Span { at: 0, len: 0 };
+            if is_punct(after, ':') {
+                let t0 = next(after + 1);
+                var t = t0;
+                while t < e && !is_punct(t, '=') { t++; }
+                var last = t - 1;
+                while last > t0 && toks[last].kind == K_SPACE { last--; }
+                ty = Span { at: toks[t0].at, len: toks[last].at + toks[last].len - toks[t0].at };
+                after = t;
+            }
+            let rhs = next(after + 1);
+            let o = if is_punct(after, '=') { is_control(rhs, d.set) } else { -1 };
+            if o >= 0 && next(closing(next(rhs + 1), '(', ')') + 1) == e {
+                let v = add_var(span_of(name_i), if ty.len > 0 { ty } else { ops[o].ret });
+                let lp = next(rhs + 1);
+                write_stop(o, v, lp, closing(lp, '(', ')'));
+                return;
+            }
+            if has_stop(j, e) {
+                error_at(toks[j].at, "a machine fn stops at `let x = op(…);`: not inside an expression");
+                return;
+            }
+            if ty.len == 0 {
+                error_at(toks[name_i].at, str("`", tok_text(name_i), "` in a machine fn: its variables are the frame's ",
+                    "fields — give it a type (`let ", tok_text(name_i), ": T = …`)"));
+                return;
+            }
+            add_var(span_of(name_i), ty);
+            if is_punct(after, '=') {
+                format(body, " ", tok_text(name_i), " = ");
+                copy_tokens(rhs, e, true);
+            }
+        }
+
+        recursive fn lower(from: i64, to: i64) {
+            var j = next(from);
+            while j <= to && j < d.close {
+                let e = stmt_end(j, to + 1);
+                if is_word(j, "let") || is_word(j, "var") {
+                    lower_let(j, e);
+                } else if !has_stop(j, e) {
+                    format(body, " ");
+                    copy_tokens(j, e, true);
+                } else if is_control(j, d.set) >= 0 && next(closing(next(j + 1), '(', ')') + 1) == e {
+                    let lp = next(j + 1);
+                    write_stop(is_control(j, d.set), -1, lp, closing(lp, '(', ')'));
+                } else if is_word(j, "if") {
+                    let ob = open_brace(next(j + 1));
+                    let cb = closing(ob, '{', '}');
+                    let la = new_label();
+                    let lj = new_label();
+                    let el = next(cb + 1);
+                    let has_else = el <= e && is_word(el, "else");
+                    let lb = if has_else { new_label() } else { lj };
+                    format(body, " if (");
+                    copy_tokens(next(j + 1), ob - 1, false);
+                    format(body, ") { at = ", la, "; } else { at = ", lb, "; } continue; },\n            ");
+                    open(la);
+                    lower(next(ob + 1), cb - 1);
+                    jump(lj);
+                    if has_else {
+                        open(lb);
+                        let be = next(el + 1);
+                        if is_word(be, "if") { lower(be, e); }
+                        else { lower(next(be + 1), closing(be, '{', '}') - 1); }
+                        jump(lj);
+                    }
+                    open(lj);
+                } else if is_word(j, "while") || is_word(j, "loop") {
+                    let ob = open_brace(next(j + 1));
+                    let cb = closing(ob, '{', '}');
+                    let lh = new_label();
+                    let lb = new_label();
+                    let lx = new_label();
+                    jump(lh);
+                    open(lh);
+                    if is_word(j, "while") {
+                        format(body, " if (");
+                        copy_tokens(next(j + 1), ob - 1, false);
+                        format(body, ") { at = ", lb, "; } else { at = ", lx, "; } continue; },\n            ");
+                    } else {
+                        jump(lb);
+                    }
+                    open(lb);
+                    loops.push(lx);
+                    loops.push(lh);
+                    lower(next(ob + 1), cb - 1);
+                    loops.resize(loops.len - 2);
+                    jump(lh);
+                    open(lx);
+                } else if is_word(j, "for") {
+                    // for i in a..b { … } or for i in n { … }: i a frame field, the end too
+                    let name_i = next(j + 1);
+                    let in_i = next(name_i + 1);
+                    let ob = open_brace(in_i);
+                    let cb = closing(ob, '{', '}');
+                    guard is_word(in_i, "in") else { error_at(toks[j].at, "expected `for i in a..b`"); return; }
+                    var dots = -1;
+                    for t in next(in_i + 1)..ob { if dots < 0 && is_punct(t, '.') && is_punct(t + 1, '.') { dots = t; } }
+                    let iv = add_var(span_of(name_i), Span { at: 0, len: 0 });
+                    var endname: u8[..32] = [];
+                    format(endname, "okay_end", fresh_vars);
+                    fresh_vars++;
+                    format(body, " ", tok_text(name_i), " = ");
+                    if dots >= 0 { format(body, "("); copy_tokens(next(in_i + 1), dots - 1, false); format(body, ")"); }
+                    else { format(body, "0"); }
+                    format(body, "; ", endname, " = (");
+                    if dots >= 0 { copy_tokens(next(dots + 2), ob - 1, false); } else { copy_tokens(next(in_i + 1), ob - 1, false); }
+                    format(body, ");");
+                    let lh = new_label();
+                    let lb = new_label();
+                    let lc = new_label();
+                    let lx = new_label();
+                    jump(lh);
+                    open(lh);
+                    format(body, " if ", tok_text(name_i), " < ", endname, " { at = ", lb, "; } else { at = ", lx,
+                        "; } continue; },\n            ");
+                    open(lb);
+                    loops.push(lx);
+                    loops.push(lc);
+                    lower(next(ob + 1), cb - 1);
+                    loops.resize(loops.len - 2);
+                    jump(lc);
+                    open(lc);
+                    format(body, " ", tok_text(name_i), " += 1;");
+                    jump(lh);
+                    open(lx);
+                    // the loop's variables, i64: the counter's type left empty is filled here
+                    vars[iv].ty = Span { at: -1, len: 3 };
+                    vars.push(MVar { name: Span { at: -2 - (fresh_vars - 1), len: 0 }, ty: Span { at: -1, len: 3 } });
+                } else if is_punct(j, '{') {
+                    lower(next(j + 1), closing(j, '{', '}') - 1);
+                } else {
+                    error_at(toks[j].at, "a stop inside this statement: a machine fn stops in its body, in if, while, for and loop");
+                }
+                j = next(e + 1);
+            }
+        }
+
+        // the parameters: the first fields
         var i = next(d.lp + 1);
         while i < d.rp {
             let name_i = i;
@@ -524,220 +822,104 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             }
             var last = e - 1;
             while last > t0 && toks[last].kind == K_SPACE { last--; }
-            vars.push(MVar { name: span_of(name_i), ty: Span { at: toks[t0].at, len: toks[last].at + toks[last].len - toks[t0].at } });
+            add_var(span_of(name_i), Span { at: toks[t0].at, len: toks[last].at + toks[last].len - toks[t0].at });
             i = if e < d.rp { next(e + 1) } else { d.rp };
         }
-        // the statements: each stop found, each variable bound
-        var j = next(d.open + 1);
-        while j < d.close {
-            let st = j;
-            var e = j;
-            var depth = 0;
-            loop {
-                if e >= d.close { break; }
-                if is_punct(e, '{') || is_punct(e, '(') || is_punct(e, '[') { depth++; }
-                if is_punct(e, '}') || is_punct(e, ')') || is_punct(e, ']') {
-                    depth--;
-                    if depth == 0 && is_punct(e, '}') && !is_word(next(e + 1), "else") { break; }
-                }
-                if depth == 0 && is_punct(e, ';') { break; }
-                e++;
-            }
-            var stop = -1;
-            var bind = Span { at: 0, len: 0 };
-            var call = -1;
-            var plain_name = Span { at: 0, len: 0 };
-            var plain_ty = Span { at: 0, len: 0 };
-            if is_word(st, "let") || is_word(st, "var") {
-                let name_i = next(st + 1);
-                var eq = next(name_i + 1);
-                if is_punct(eq, ':') {
-                    let t0 = next(eq + 1);
-                    var t = t0;
-                    while t < e && !is_punct(t, '=') { t++; }
-                    var last = t - 1;
-                    while last > t0 && toks[last].kind == K_SPACE { last--; }
-                    plain_ty = Span { at: toks[t0].at, len: toks[last].at + toks[last].len - toks[t0].at };
-                    eq = t;
-                }
-                let rhs = next(eq + 1);
-                let o = is_control(rhs, d.set);
-                if o >= 0 && next(closing(next(rhs + 1), '(', ')') + 1) == e {
-                    stop = o;
-                    bind = span_of(name_i);
-                    call = rhs;
-                } else {
-                    plain_name = span_of(name_i);
-                }
-            } else {
-                let o = is_control(st, d.set);
-                if o >= 0 && next(closing(next(st + 1), '(', ')') + 1) == e { stop = o; call = st; }
-            }
-            if stop < 0 {
-                for t in st..e + 1 {
-                    if t < d.close && is_control(t, d.set) >= 0 {
-                        error_at(toks[t].at, str("`", tok_text(t), "` inside a statement: a machine fn stops only at ",
-                            "`let x = op(…);` or `op(…);` in its body (if and loops: not yet)"));
-                    }
-                }
-                if plain_name.len > 0 { vars.push(MVar { name: plain_name, ty: plain_ty }); }
-            } else {
-                let lp = next(call + 1);
-                points.push(Point { op: stop, bind: bind, args_lp: lp, args_rp: closing(lp, '(', ')'), stmt_from: st,
-                                    stmt_to: e, nvars: vars.len });
-                if bind.len > 0 { vars.push(MVar { name: bind, ty: ops[stop].ret }); }
-            }
-            j = next(e + 1);
-        }
-        // every variable in a frame has a type
-        for p in points {
-            for v in p.nvars {
-                if vars[v].ty.len == 0 {
-                    error_at(vars[v].name.at, str("`", text(vars[v].name), "` lives across a stop of a machine fn: ",
-                        "give it a type (`let ", text(vars[v].name), ": T = …`)"));
-                    return;
-                }
-            }
-        }
-        var pname: u8[>..] = [];
-        let n = text(d.name);
-        if n[0] >= 'a' && n[0] <= 'z' { pname.push(n[0] - 32); } else { pname.push(n[0]); }
-        pname.append(n[1..]);
-        let has_ret = d.ret.len > 0 && text(d.ret) != "()";
+        let n_params = vars.len;
 
-        fn cap(s: u8[:]) {
-            if s[0] >= 'a' && s[0] <= 'z' { mout.push(s[0] - 32); } else { mout.push(s[0]); }
-            mout.append(s[1..]);
+        // the body, from block 0
+        format(body, "0 => {");
+        lower(next(d.open + 1), d.close - 1);
+        if has_ret { format(body, " abort(\"okay: machine fn ", n, " ended without a value\"); },\n"); }
+        else { format(body, " return ", pname, ".Done {}; },\n"); }
+
+        // a variable's name and type as written (the loops' made-up ones, i64)
+        fn vname(v: i64, buf: u8[>..]&) {
+            let s = vars[v].name;
+            if s.at <= -2 { format(buf, "okay_end", -2 - s.at); } else { buf.append(text(s)); }
+        }
+        fn vtype(v: i64, buf: u8[>..]&) {
+            if vars[v].ty.at == -1 { format(buf, "i64"); } else { buf.append(text(vars[v].ty)); }
+        }
+        fn frame(l: i64) {
+            format(mout, pname, "_k { at: ", l);
+            for v in vars.len { format(mout, ", "); vname(v, mout); format(mout, ": "); vname(v, mout); }
+            format(mout, " }");
         }
         fn used(o: i64) -> bool {
-            for p in points { if p.op == o { return true; } }
+            for q in stop_op { if q == o { return true; } }
             return false;
         }
-        fn fields(nv: i64) {
-            for v in nv {
-                if v > 0 { format(mout, ", "); }
-                format(mout, text(vars[v].name), ": ", text(vars[v].name));
-            }
-        }
-        // tokens copied: the context passed, each `return x;` the program's `Done`
-        fn copy_tokens(from: i64, to: i64) {
-            var close_at = -1;
-            var t = from;
-            while t <= to && t < toks.len {
-                var passed = false;
-                for q in passes { if q == t { passed = true; } }
-                if passed {
-                    format(mout, "(cx");
-                    if !is_punct(next(t + 1), ')') { format(mout, ", "); }
-                    t++;
-                    continue;
-                }
-                if t == close_at { format(mout, ") }"); }
-                if is_word(t, "return") {
-                    let v = next(t + 1);
-                    if is_punct(v, ';') { format(mout, "return ", pname, ".Done {}"); t = v; continue; }
-                    format(mout, "return ", pname, ".Done { v: (");
-                    var c = v;
-                    var dp = 0;
-                    while c < to && !(dp == 0 && is_punct(c, ';')) {
-                        if is_punct(c, '(') || is_punct(c, '[') || is_punct(c, '{') { dp++; }
-                        if is_punct(c, ')') || is_punct(c, ']') || is_punct(c, '}') { dp--; }
-                        c++;
-                    }
-                    close_at = c;
-                    t = v;
-                    continue;
-                }
-                mout.append(tok_text(t));
-                t++;
-            }
-        }
-        // the stop's step: the operation's arguments by its parameters' names, and the rest
-        fn write_stop(k: i64) {
-            let p = points[k];
-            let op = ops[p.op];
-            format(mout, " return ", pname, ".");
-            cap(text(op.name));
-            format(mout, " { ");
-            var a = next(p.args_lp + 1);
-            each_param(op.params) { pn, ty =>
-                var e = a;
-                var dp = 0;
-                while e < p.args_rp && !(dp == 0 && is_punct(e, ',')) {
-                    if is_punct(e, '(') || is_punct(e, '[') { dp++; }
-                    if is_punct(e, ')') || is_punct(e, ']') { dp--; }
-                    e++;
-                }
-                format(mout, pn, ": (");
-                copy_tokens(a, e - 1);
-                format(mout, "), ");
-                a = if e < p.args_rp { next(e + 1) } else { p.args_rp };
-            };
-            format(mout, "k: ", pname, "_", text(op.name), ".At", k, " { ");
-            fields(p.nvars);
-            format(mout, " } };");
-        }
-        // the piece after stop k-1 (k == 0: from the start), to stop k or the end
-        fn write_piece(k: i64) {
-            let from = if k == 0 { d.open + 1 } else { points[k - 1].stmt_to + 1 };
-            let to = if k < points.len { points[k].stmt_from - 1 } else { d.close - 1 };
-            copy_tokens(from, to);
-            if k < points.len { write_stop(k); }
-            else if !has_ret { format(mout, " return ", pname, ".Done {};"); }
-        }
 
-        format(mout, "\n// machine fn ", n, " (", path, ":", line_of(toks[d.kw].at), "): its rests and its steps\n");
-        for o in ops.len {
-            if !used(o) { continue; }
-            format(mout, "enum ", pname, "_", text(ops[o].name), " {");
-            var first = true;
-            for k in points.len {
-                if points[k].op != o { continue; }
-                if !first { format(mout, ","); }
-                first = false;
-                format(mout, " At", k, " { ");
-                for v in points[k].nvars {
-                    if v > 0 { format(mout, ", "); }
-                    format(mout, text(vars[v].name), ": ", text(vars[v].ty));
-                }
-                format(mout, " }");
-            }
-            format(mout, " }\n");
-        }
+        format(mout, "\n// machine fn ", n, " (", path, ":", line_of(toks[d.kw].at), "): its frame, its steps, its blocks\n");
+        format(mout, "struct ", pname, "_k { at: i64");
+        for v in vars.len { format(mout, ", "); vname(v, mout); format(mout, ": "); vtype(v, mout); }
+        format(mout, " }\n");
+        for o in ops.len { if used(o) { format(mout, "struct ", pname, "_", text(ops[o].name), " { k: ", pname, "_k }\n"); } }
         format(mout, "enum ", pname, " { Done { ");
         if has_ret { format(mout, "v: ", text(d.ret), " "); }
         format(mout, "}");
         for o in ops.len {
             if !used(o) { continue; }
             format(mout, ", ");
-            cap(text(ops[o].name));
+            cap_to(mout, text(ops[o].name));
             format(mout, " { ");
             each_param(ops[o].params) { pn, ty => format(mout, pn, ": ", ty, ", "); };
             format(mout, "k: ", pname, "_", text(ops[o].name), " }");
         }
         format(mout, " }\n");
-        // the first piece
-        format(mout, "fn ", n, "<OkayCx>(cx: OkayCx&");
-        if !d.no_params { format(mout, ", ", src[toks[d.lp].at + 1..toks[d.rp].at]); }
-        format(mout, ") -> ", pname, " { ");
+        // the machine: the frame's fields locals, the blocks
+        format(mout, "fn run_", n, "<OkayCx>(cx: OkayCx&, k: ", pname, "_k) -> ", pname, " {\n    ");
         let saved = out.len;
         write_check(d.set, " ");
-        // write_check writes to out: moved here
         mout.append(out[saved..]);
         out.resize(saved);
-        write_piece(0);
-        format(mout, " }\n");
-        // the others: resumed by the frame's variant, with the operation's value
-        for k in points.len {
-            let p = points[k];
-            let op = ops[p.op];
-            format(mout, "fn resume<OkayCx>(cx: OkayCx&, k: ", pname, "_", text(op.name), ".At", k);
+        format(mout, "\n    var at = k.at;");
+        for v in vars.len { format(mout, " var "); vname(v, mout); format(mout, " = k."); vname(v, mout); format(mout, ";"); }
+        format(mout, "\n    loop {\n        match at {\n            ");
+        var b = 0;
+        while b < body.len {
+            if body[b] == 1 {
+                var l = 0;
+                b++;
+                while body[b] != 2 { l = l * 10 + (body[b] - '0'); b++; }
+                frame(l);
+            } else {
+                mout.push(body[b]);
+            }
+            b++;
+        }
+        format(mout, "            _ => { abort(\"okay: machine fn ", n, ": no such block\"); },\n        }\n    }\n}\n");
+        // the first step
+        format(mout, "fn ", n, "<OkayCx>(cx: OkayCx&");
+        if !d.no_params { format(mout, ", ", src[toks[d.lp].at + 1..toks[d.rp].at]); }
+        format(mout, ") -> ", pname, " { return run_", n, "(cx, ", pname, "_k { at: 0");
+        for v in vars.len {
+            format(mout, ", ");
+            vname(v, mout);
+            format(mout, ": ");
+            if v < n_params { vname(v, mout); } else { format(mout, "default<"); vtype(v, mout); format(mout, ">()"); }
+        }
+        format(mout, " }); }\n");
+        // the others: the operation's value into the variable its stop binds, the machine run on
+        for o in ops.len {
+            if !used(o) { continue; }
+            let op = ops[o];
+            format(mout, "fn resume<OkayCx>(cx: OkayCx&, k: ", pname, "_", text(op.name));
             if op.ret.len > 0 { format(mout, ", v: ", text(op.ret)); }
-            format(mout, ") -> ", pname, " {");
-            for v in p.nvars { format(mout, " var ", text(vars[v].name), " = k.", text(vars[v].name), ";"); }
-            if p.bind.len > 0 { format(mout, " var ", text(p.bind), " = v;"); }
-            write_piece(k + 1);
-            format(mout, " }\n");
+            format(mout, ") -> ", pname, " { var f = k.k;");
+            if op.ret.len > 0 {
+                format(mout, " match f.at {");
+                for q in stop_at.len {
+                    if stop_op[q] == o && stop_bind[q] >= 0 {
+                        format(mout, " ", stop_at[q], " => { f.");
+                        vname(stop_bind[q], mout);
+                        format(mout, " = v; },");
+                    }
+                }
+                format(mout, " _ => {}, }");
+            }
+            format(mout, " return run_", n, "(cx, f); }\n");
         }
     }
 

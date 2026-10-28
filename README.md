@@ -65,18 +65,23 @@ machine fn pick(base: i64) -> i64 ! Choose + Log {
 }
 ```
 
-Written out: `enum Pick { Done { v: i64 }, Among { n: i64, k: Pick_among } }`, the rests
-`enum Pick_among { At0 { base: i64 }, At1 { base: i64, a: i64 } }`, the first step `pick(cx, base)` and the others
-`resume(cx, k, v)` — by the frame's variant, `v` of the operation's type, no cast. A handler is plain code over the
-steps: `all` resumes a rest once for each alternative, `first` once. A step is flat: written out as bytes
-(`to_bytes`), it is resumed from them later or elsewhere (`examples/choose.okg`: 27 bytes). Not yet: stops inside
-`if` and loops, a machine fn calling a machine fn.
+Written out, a STATE MACHINE: its frame one struct — where it stopped (`at`) and every variable of the function
+(`struct Pick_k { at: i64, base: i64, a: i64, b: i64, sum: i64 }`) —, its body `loop { match at { … } }`, cut into
+blocks only where a statement holds a stop: a stop ends a block (its step returned, the rest a frame), an `if`,
+`while`, `for` or `loop` holding one becomes jumps between blocks (`break`, `continue` and `return` inside too), a
+statement holding none is copied as it is. Its steps: `enum Pick { Done { v: i64 }, Among { n: i64, k: Pick_among } }`;
+the first `pick(cx, base)`, the others `resume(cx, k, v)` by the operation's rest type, `v` of its type — no cast. A
+handler is plain code over the steps: `all` resumes a rest once for each alternative, `first` once, a generator's
+consumer pulls (`examples/loops.okg`). A step is flat: written out as bytes (`to_bytes`), it is resumed from them
+later or elsewhere (`examples/choose.okg`). A variable of a machine fn has a type (op-bound ones take the
+operation's), one name each. Not yet: a stop inside an expression or a `match`, a machine fn calling a machine fn.
 
 ## Layout
 
 - `src/okgc.goose` — the front end
 - `examples/shop.okg` — the shop: effects, sets, `A ! F + G`, an interceptor with forwarding
 - `examples/choose.okg` — a machine fn: all paths, the first, a step saved as bytes and resumed
+- `examples/loops.okg` — a generator pulled value by value; a search whose `while` stops at each guess
 - `proto/01_context.goose` — effects as overloads on a context, an interceptor, an aborting handler
 - `proto/02_machine.goose` — a machine: defunctionalized frames, `among` taking `k`, the `all` handler resuming it
   for each alternative; `k` as bytes and back
@@ -89,7 +94,7 @@ tests/run.sh
 
 ## Next
 
-- machine fns: stops inside `if` and loops (labels as states), a machine fn calling a machine fn (a stack of frames)
+- machine fns: a machine fn calling a machine fn (a stack of frames), stops inside expressions and `match`
 - `abort` effects generated as `return … from`; handlers declared (`handler all for Choose { … }`) and written out
 - sensitive effects (needs okgc's own modules and privacy: Goose has none)
 - okgc rewritten in its own dialect, its diagnostics and tables as effects

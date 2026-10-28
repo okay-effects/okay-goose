@@ -1,0 +1,67 @@
+// Machine fns with loops: a generator pulled value by value, and a search whose loop stops at each guess.
+
+effect Yield: once { emit(v: i64); }
+effect Guess: many { guess(limit: i64) -> i64; }
+effect Log { log(line: u8[:]); }
+
+// a generator: every even square below n, the odd ones logged
+machine fn squares(n: i64) ! Yield + Log {
+    for i in 0..n {
+        if i % 2 == 0 {
+            emit(i * i);
+        } else {
+            log("odd skipped");
+        }
+    }
+    emit(-1);
+}
+
+// a loop stopping at each guess: break, continue and return inside it
+machine fn search(target: i64) -> i64 ! Guess + Log {
+    var tries: i64 = 0;
+    while true {
+        let g = guess(10);
+        tries += 1;
+        if g < 0 { continue; }
+        if g == target { return tries; }
+        if tries >= 5 { break; }
+    }
+    log("gave up");
+    return -1;
+}
+
+struct Console { lines: i64 }
+fn log(cx: Console&, line: u8[:]) { cx.lines += 1; }
+
+fn main() {
+    var c = Console { lines: 0 };
+    // pulled: each step one value, the rest resumed once
+    var out: i64[>..] = [];
+    var s = squares(c, 7);
+    loop {
+        match s {
+            Done => { break; },
+            Emit e => { out.push(e.v); s = resume(c, e.k); },
+        }
+    }
+    print("squares: ", out, ", logged ", c.lines);
+
+    // guesses fed in turn: a miss, a negative one skipped, then the target
+    let feed: i64[5] = [4, -1, 9, 7, 2];
+    var at = 0;
+    var t = search(c, 7);
+    loop {
+        match t {
+            Done d => { print("found in ", d.v, " tries"); break; },
+            Guess g => { t = resume(c, g.k, feed[at]); at++; },
+        }
+    }
+    // never found: five tries, then it gives up
+    var u = search(c, 100);
+    loop {
+        match u {
+            Done d => { print("search for 100: ", d.v, ", logged ", c.lines); break; },
+            Guess g => { u = resume(c, g.k, 1); },
+        }
+    }
+}

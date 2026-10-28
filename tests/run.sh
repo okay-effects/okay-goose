@@ -15,6 +15,8 @@ build/okgc examples/shop.okg build/shop.goose && "$goose" build/shop.goose > bui
 check shop build/shop.out
 build/okgc examples/choose.okg build/choose.goose && "$goose" build/choose.goose > build/choose.out 2>&1
 check choose build/choose.out
+build/okgc examples/loops.okg build/loops.goose && "$goose" build/loops.goose > build/loops.out 2>&1
+check loops build/loops.out
 build/okgc tests/bad_machine.okg build/bad_machine.goose > build/bad_machine.out 2>&1
 check bad_machine build/bad_machine.out
 build/okgc tests/bad_rows.okg build/bad.goose > build/bad_rows.out 2>&1

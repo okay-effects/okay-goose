@@ -1,4 +1,4 @@
 all: [111, 121, 112, 122, 113, 123], logged 3
 first: 111
-saved in 27 bytes: true Among { 2, At1 { 1000, 2 } }
+saved in 50 bytes: true Among { 2, Pick_among { Pick_k { 2, 1000, 2, 0, 0 } } }
 resumed from the bytes: 1023
