@@ -25,3 +25,22 @@ What the numbers are:
   Against Scala's kernel, 8–11× faster.
 - A Goose lane that folds is not a measure of an effect's cost; okay-rust's opaque lanes (`black_box`) have no Goose
   counterpart (Goose has no `black_box`); the state lane is shown for completeness only.
+
+## Against okay-rust's fast API (okay::typed)
+
+The same lanes against okay-rust's one API — compiled, as okay-goose is — three alternating rounds under JMH's
+lock, 2026-10-28, load 2.1–3.1, medians. The rest taken many times is okay-rust's typed API by REPLAY (the body run
+again for each path), as it was until 2026-10-27 (commit 0fb0ddd; the replay has been removed since: the one API
+is one-shot by design).
+
+| lane | okay-goose | okay-rust typed | Scala (okay-core) |
+|---|---|---|---|
+| every path of a choice among 1000 | **1.25** | 5.92 (replay) | 13.24 |
+| the rest taken and resumed at each of 1000 steps | **1.26** (R:general) | 2.21 (T:generate: suspended, resumed once each) | 9.44 |
+| a generator of 1000 values | **1.26** | 2.21 | 22.6 (okay-one's) |
+| 1000 values told | **0.14** | 1.08 | 9.45 |
+
+Both are compiled state machines. Where the time goes in Rust: an `async` body is polled through `Pin`, `Poll` and a
+`Context`, its handlers behind `RefCell`s, each suspension a round through the poll loop; a path of a choice runs the
+body again from its start. In Goose a step is a plain function returning a plain enum, and a rest resumed again is a
+struct copied. The writer: a Goose array grows by a pointer bump and never moves; a `Vec` reallocates.
