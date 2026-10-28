@@ -7,3 +7,5 @@ Receipt { false, 0 }
 Receipt { false, 5000 }
   log: paid
 Receipt { true, 50 } lines 3
+  log: audited
+  log: audited

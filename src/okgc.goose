@@ -4,13 +4,16 @@
 //
 //   effect Pay { charge(user: u8[:], cents: i64) -> bool; refund(id: i64); }
 //   effects App = Pay + Log;                          // a set of effects (of effects or of sets)
-//   fn checkout<C>(cx: C& / App, ...) { ... }         // a function's effects: what it may ask of cx
+//   fn pay(user: u8[:], cents: i64) -> Receipt ! Pay + Log { … charge(user, cents) … }   // A ! F + G
 //   forward Limited<H> to inner for App except charge;   // a wrapper's operations passed on to a field
 //
-// Checked at definition: a function with effects calls on its context only operations of its set, and calls
-// another function with effects only if that one's set is in its own. Written out: `requires_App(cx)` at the top
-// of such a function (a context lacking an operation is an error naming it), the forwarding functions, the rest of
-// the text as it was.
+// A function's type `A ! F + G`: its value `A`, its effects `F + G` (effects or sets). Its context is implicit: okgc
+// adds it — a type parameter, a first parameter `cx` — and passes it to each operation and to each function with
+// effects called in its body. Checked at definition: it calls only the operations of its effects, and functions
+// with effects within its own. Plain code calls one with a context first: `pay(ctx, "bob", 100)`. Written out: the
+// context added, a check at the top that the context has every operation (a missing one is Goose's error there,
+// naming it), `requires_App(cx)` for each set, the forwarding functions, the rest of the text as it was — on the
+// same lines: an error Goose reports in the output is at the source's line.
 //
 //   okgc input.okg output.goose
 
@@ -29,7 +32,11 @@ struct OpDecl { effect: i64, name: Span, params: Span, ret: Span }      // ret.l
 struct EffDecl { name: Span, first_op: i64, n_ops: i64, from: i64, to: i64 }
 struct SetDecl { name: Span, first: i64, n: i64, from: i64, to: i64 }  // members[first..first+n]: effects
 struct Fwd { ty: Span, field: Span, set: i64, first_ex: i64, n_ex: i64, from: i64, to: i64 }
-struct FnDecl { name: Span, set: i64, param: Span, row_from: i64, row_to: i64, open: i64, close: i64 }
+// a function with effects: `fn name<…>(params) -> A ! F + G { body }` — its set (anonymous, named by its effects'
+// text), and the tokens the writer changes: after the name (or the generics' `>`) the context's type parameter, at
+// `(` the context, `! F + G` dropped, at `{` the check that the context has every operation
+struct FnDecl { name: Span, name_i: i64, set: i64, gt: i64, lp: i64, no_params: bool, bang_from: i64, bang_to: i64,
+                open: i64, close: i64 }
 
 fn is_alpha(c: u8) -> bool { (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' }
 fn is_digit(c: u8) -> bool { c >= '0' && c <= '9' }
@@ -261,39 +268,61 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         return i + 1;
     }
 
-    // fn name...(…, cx: T / Set, …) … { body }: a function with effects; any other fn is passed by
+    // fn name<…>(params) -> A ! F + G { body }: a function with effects; any other fn is passed by
     fn parse_fn(from: i64) -> i64 {
         let name_i = next(from + 1);
         var lp = next(name_i + 1);
-        if is_punct(lp, '<') { lp = next(closing(lp, '<', '>') + 1); }
+        var gt = -1;
+        if is_punct(lp, '<') {
+            gt = closing(lp, '<', '>');
+            lp = next(gt + 1);
+        }
         guard is_punct(lp, '(') else { return from + 1; }
         let rp = closing(lp, '(', ')');
-        var row_from = -1;
-        var set = -1;
-        var param = Span { at: 0, len: 0 };
-        var i = lp + 1;
-        var last_name = Span { at: 0, len: 0 };
-        while i < rp {
-            if toks[i].kind == K_IDENT && is_punct(next(i + 1), ':') { last_name = span_of(i); }
-            if is_punct(i, '/') {
-                let s = next(i + 1);
-                if toks[s].kind == K_IDENT && find_set(span_of(s)) >= 0 {
-                    row_from = i;
-                    set = find_set(span_of(s));
-                    param = last_name;
-                    i = s;
-                }
-            }
+        let no_params = next(lp + 1) == rp;
+        // the return type, then `!` and the effects, up to the body
+        var i = next(rp + 1);
+        var bang = -1;
+        var depth = 0;
+        while i < toks.len && !(depth == 0 && (is_punct(i, '{') || is_punct(i, ';'))) {
+            if is_punct(i, '<') || is_punct(i, '[') || is_punct(i, '(') { depth++; }
+            if is_punct(i, '>') && !is_punct(i - 1, '-') { depth--; }
+            if is_punct(i, ']') || is_punct(i, ')') { depth--; }
+            if depth == 0 && is_punct(i, '!') && bang < 0 { bang = i; }
             i++;
         }
-        var open = rp + 1;
-        while open < toks.len && !is_punct(open, '{') && !is_punct(open, ';') { open++; }
+        let open = i;
         guard is_punct(open, '{') else { return open + 1; }
         let close = closing(open, '{', '}');
-        if set >= 0 {
-            fns.push(FnDecl { name: span_of(name_i), set: set, param: param, row_from: row_from,
-                              row_to: next(row_from + 1), open: open, close: close });
+        if bang < 0 { return close + 1; }
+        // F + G: effects and sets, flattened into a set named by their text
+        let first = members.len;
+        var e = next(bang + 1);
+        var last = e;
+        loop {
+            guard e < open && toks[e].kind == K_IDENT else {
+                error_at(toks[bang].at, "expected effects after `!`: `A ! F + G`");
+                return close + 1;
+            }
+            let ef = find_effect(span_of(e));
+            let k = find_set(span_of(e));
+            if ef >= 0 { members.push(ef); }
+            else if k >= 0 {
+                let st = sets[k];
+                for m in st.first..st.first + st.n { members.push(members[m]); }
+            } else {
+                error_at(toks[e].at, str("no effect or set `", tok_text(e), "` declared before"));
+            }
+            last = e;
+            let after = next(e + 1);
+            if is_punct(after, '+') { e = next(after + 1); continue; }
+            break;
         }
+        let set = sets.len;
+        let name = Span { at: toks[next(bang + 1)].at, len: toks[last].at + toks[last].len - toks[next(bang + 1)].at };
+        sets.push(SetDecl { name: name, first: first, n: members.len - first, from: -1, to: -1 });
+        fns.push(FnDecl { name: span_of(name_i), name_i: name_i, set: set, gt: gt, lp: lp, no_params: no_params,
+                          bang_from: bang, bang_to: last, open: open, close: close });
         return close + 1;
     }
 
@@ -312,40 +341,36 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         }
     }
 
-    // CHECKING: each function with effects calls on its context only operations of its set, and functions with
-    // effects whose sets are in its own
+    // CHECKING: each function with effects calls only the operations of its effects, and functions with effects
+    // whose effects are within its own. Each such call is where the writer passes the context (`(` → `(cx, `)
+    var passes: i64[>..] = [];
     fn check() {
         for f in fns.len {
             let d = fns[f];
             let set_name = text(sets[d.set].name);
             for i in d.open..d.close {
-                // name(cx …  or  cx.name(
-                var callee = -1;
-                if toks[i].kind == K_IDENT && is_punct(next(i + 1), '(') {
-                    let a = next(next(i + 1) + 1);
-                    if a < toks.len && toks[a].kind == K_IDENT && tok_text(a) == text(d.param) { callee = i; }
-                }
-                if toks[i].kind == K_IDENT && tok_text(i) == text(d.param) && is_punct(i + 1, '.') {
-                    let m = i + 2;
-                    if m < toks.len && toks[m].kind == K_IDENT && is_punct(next(m + 1), '(') { callee = m; }
-                }
-                if callee < 0 { continue; }
-                let o = find_op(span_of(callee));
-                if o >= 0 && !set_has(d.set, ops[o].effect) {
-                    error_at(toks[callee].at, str("`", text(d.name), "` (effects ", set_name, ") calls `",
-                        tok_text(callee), "` of ", text(effs[ops[o].effect].name), ", which ", set_name,
-                        " does not have"));
-                }
-                let g = find_fn(span_of(callee));
-                if o < 0 && g >= 0 {
+                guard toks[i].kind == K_IDENT && is_punct(next(i + 1), '(') else { continue; }
+                // not a method call on something else, not a function declared here
+                var before = i - 1;
+                while before > 0 && toks[before].kind == K_SPACE { before--; }
+                if is_punct(before, '.') || is_word(before, "fn") { continue; }
+                let o = find_op(span_of(i));
+                let g = find_fn(span_of(i));
+                if o >= 0 {
+                    if !set_has(d.set, ops[o].effect) {
+                        error_at(toks[i].at, str("`", text(d.name), "` (! ", set_name, ") calls `", tok_text(i),
+                            "` of ", text(effs[ops[o].effect].name), ", which ", set_name, " does not have"));
+                    }
+                    passes.push(next(i + 1));
+                } else if g >= 0 {
                     let gs = sets[fns[g].set];
                     for m in gs.first..gs.first + gs.n {
                         if !set_has(d.set, members[m]) {
-                            error_at(toks[callee].at, str("`", text(d.name), "` (effects ", set_name,
-                                ") calls `", tok_text(callee), "` (effects ", text(gs.name), "), which needs ",
-                                text(effs[members[m]].name)));
+                            error_at(toks[i].at, str("`", text(d.name), "` (! ", set_name, ") calls `", tok_text(i),
+                                "` (! ", text(gs.name), "), which needs ", text(effs[members[m]].name)));
                         }
                     }
+                    passes.push(next(i + 1));
                 }
             }
         }
@@ -376,18 +401,25 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         }
     }
 
-    fn write_requires(k: i64) {
+    // every operation of the set called on cx, never run: a context lacking one is an error here
+    fn write_check(k: i64, sep: u8[:]) {
         let st = sets[k];
-        format(out, "fn requires_", text(st.name), "<C>(cx: C&) {\n    if false {\n");
+        format(out, "if false {");
         for m in st.first..st.first + st.n {
             let e = effs[members[m]];
             for o in e.first_op..e.first_op + e.n_ops {
-                format(out, "        ", text(ops[o].name), "(cx");
+                format(out, sep, text(ops[o].name), "(cx");
                 each_param(ops[o].params) { name, ty => format(out, ", default<", ty, ">()"); };
-                format(out, ");\n");
+                format(out, ");");
             }
         }
-        format(out, "    }\n}");
+        format(out, " }");
+    }
+
+    fn write_requires(k: i64) {
+        format(out, "fn requires_", text(sets[k].name), "<C>(cx: C&) { ");
+        write_check(k, " ");
+        format(out, " }");
     }
 
     fn excepted(w: Fwd, o: i64) -> bool {
@@ -406,7 +438,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             for o in e.first_op..e.first_op + e.n_ops {
                 if excepted(w, o) { continue; }
                 let op = ops[o];
-                if !first { format(out, "\n"); }
+                if !first { format(out, " "); }   // one line: the output's lines are the source's
                 first = false;
                 format(out, "fn ", text(op.name), generics, "(cx: ", ty, "&");
                 if op.params.len > 0 { format(out, ", ", text(op.params)); }
@@ -444,9 +476,28 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                 if !done && i == fwds[w].from { write_forward(fwds[w]); i = fwds[w].to + 1; done = true; }
             }
             for f in fns.len {
-                if !done && i == fns[f].row_from { i = fns[f].row_to + 1; done = true; }
-                if !done && i == fns[f].open {
-                    format(out, "{ requires_", text(sets[fns[f].set].name), "(", text(fns[f].param), ");");
+                let d = fns[f];
+                if done { break; }
+                if i == d.name_i && d.gt < 0 { format(out, tok_text(i), "<OkayCx>"); i++; done = true; }
+                else if i == d.gt { format(out, ", OkayCx>"); i++; done = true; }
+                else if i == d.lp {
+                    format(out, "(cx: OkayCx&");
+                    if !d.no_params { format(out, ", "); }
+                    i++;
+                    done = true;
+                }
+                else if i >= d.bang_from && i <= d.bang_to { i++; done = true; }
+                else if i == d.open {
+                    format(out, "{ ");
+                    write_check(d.set, " ");
+                    i++;
+                    done = true;
+                }
+            }
+            for p in passes {
+                if !done && i == p {
+                    format(out, "(cx");
+                    if !is_punct(next(i + 1), ')') { format(out, ", "); }
                     i++;
                     done = true;
                 }
@@ -462,8 +513,10 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
     parse();
     check();
     if errors > 0 { return false; }
-    format(out, "// written by okgc from ", path, ": do not edit\n");
     write_out();
+    // at the end, so that every line of the output is the line of the source it came from: an error Goose reports
+    // in the output names the source's line
+    format(out, "\n// written by okgc from ", path, ": do not edit, its lines are the source's\n");
     guard write_file(out_path, out) else {
         print("okgc: cannot write ", out_path);
         return false;

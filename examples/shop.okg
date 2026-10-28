@@ -15,19 +15,25 @@ effects Shop = Payments + Stock;
 
 struct Receipt { paid: bool, cents: i64 }
 
-// what it may ask of its context: Payments, and no more
-fn pay<C>(cx: C& / Payments, user: u8[:], cents: i64) -> Receipt {
-    let ok = charge(cx, user, cents);
-    if ok { log(cx, "paid"); } else { log(cx, "declined"); }
+// A ! F + G: a receipt, asking Pay and Log of its context — and no more. The context is implicit
+fn pay(user: u8[:], cents: i64) -> Receipt ! Pay + Log {
+    let ok = charge(user, cents);
+    if ok { log("paid"); } else { log("declined"); }
     return Receipt { paid: ok, cents: cents };
 }
 
-fn checkout<C>(cx: C& / Shop, user: u8[:], item: u8[:], cents: i64) -> Receipt {
-    if !cx.reserve(item) {
-        log(cx, "out of stock");
+// a set of effects in the type: Shop = Pay + Log + Stock
+fn checkout(user: u8[:], item: u8[:], cents: i64) -> Receipt ! Shop {
+    if !reserve(item) {
+        log("out of stock");
         return Receipt { paid: false, cents: 0 };
     }
-    return pay(cx, user, cents);
+    return pay(user, cents);
+}
+
+// no value: only effects
+fn audit_all(n: i64) ! Log {
+    for i in n { log("audited"); }
 }
 
 // a test context
@@ -52,4 +58,5 @@ fn main() {
     var l = Limited<Test> { inner: Test { approve: true, stock: 5, lines: 0 }, limit: 1000 };
     print(checkout(l, "eve", "pen", 5000));
     print(checkout(l, "eve", "pen", 50), " lines ", l.inner.lines);
+    audit_all(t, 2);    // plain code passes a context first
 }

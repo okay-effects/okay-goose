@@ -16,6 +16,6 @@ check shop build/shop.out
 build/okgc tests/bad_rows.okg build/bad.goose > build/bad_rows.out 2>&1
 check bad_rows build/bad_rows.out
 build/okgc tests/missing_op.okg build/missing.goose && "$goose" build/missing.goose > build/missing.out 2>&1
-if grep -q "unknown function: refund" build/missing.out && grep -q "requires_Payments" build/missing.out; then echo "ok   missing_op"; else echo "FAIL missing_op"; fail=1; fi
+if grep -q "missing.goose:2: error: unknown function: refund" build/missing.out && grep -q "in fn pay(NoRefund&)" build/missing.out; then echo "ok   missing_op"; else echo "FAIL missing_op"; fail=1; fi
 for p in 01_context 02_machine; do "$goose" proto/$p.goose > build/$p.out 2>&1; check $p build/$p.out; done
 exit $fail
