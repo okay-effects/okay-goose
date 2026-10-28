@@ -1,8 +1,13 @@
 // okay-goose's lanes, as okay-rust's (machine/benches/kernel.rs): the same programs and n, µs per run — warm-up a
-// second, then five rounds of a second. The direct style (G:), the resumable fns and handlers (R:).
+// second, then five rounds of a second. The direct style (G:), the resumable fns and handlers (R:). As okay-rust's
+// and okay-zig's, each answer goes through `okay_opaque` (bench/opaque.h: an empty asm, no call), so a run is not
+// folded into a formula: `okgc build bench/lanes.okg -o build/lanes --include bench/opaque.h`.
 
 import os;
 import math;
+
+extern fn okay_opaque(x: i64) -> i64;    // bench/opaque.h
+extern fn okay_keep(x: i64);
 
 effect State { get() -> i64; put(v: i64); }
 effect Tell { tell(v: i64); }
@@ -41,6 +46,7 @@ resumable fn ticks(n: i64) -> bool ! Tick {
     var even: bool = true;
     for i in 0..n {
         let v = tick(i);
+        okay_keep(v);
         even = !even;
     }
     return even;
@@ -48,15 +54,15 @@ resumable fn ticks(n: i64) -> bool ! Tick {
 
 handler sum for Yield(total: i64&) {
     return() { }
-    emit(v, k) { total += v; resume(k); }
+    emit(v, k) { total += okay_opaque(v); resume(k); }
 }
 handler count_all for Choose(found: i64&) {
     return(v) { found += 1; }
-    among(n, k) { for i in n { resume(k, i); } }
+    among(n, k) { for i in n { resume(k, okay_opaque(i)); } }
 }
 handler answer for Tick -> bool {
     return(v) { v }
-    tick(v, k) { resume(k, v) }
+    tick(v, k) { resume(k, okay_opaque(v)) }
 }
 
 struct None { }

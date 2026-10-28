@@ -1698,7 +1698,8 @@ fn mapped(msgs: u8[:], out_path: u8[:], in_path: u8[:], lines: i64[:]) {
 
 fn main() {
     let a = args();
-    let usage = "usage: okgc input.okg output.goose | okgc run input.okg [args…] | okgc build input.okg -o program";
+    let usage = str("usage: okgc input.okg output.goose | okgc run input.okg [args…] | ",
+        "okgc build input.okg -o program [goose's options…]");
     guard a.len >= 3 else {
         print(usage);
         exit(2);
@@ -1730,11 +1731,12 @@ fn main() {
     var cmd: u8[>..] = [];
     quote(cmd, goose);
     if mode == "build" {
-        guard a.len == 5 && a[3] == "-o" else { print(usage); exit(2); }
+        guard a.len >= 5 && a[3] == "-o" else { print(usage); exit(2); }
         format(cmd, " build ");
         quote(cmd, out_path);
         format(cmd, " -o ");
         quote(cmd, a[4]);
+        for k in 5..a.len { format(cmd, " "); quote(cmd, a[k]); }    // the rest Goose's (`--include x.h`, `-O1`)
     } else {
         format(cmd, " ");
         quote(cmd, out_path);
