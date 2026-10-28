@@ -77,7 +77,9 @@ stop: the parameters, the ones stops bind, the ones used in two blocks or in a l
 (`struct Pick_k { at: i64, base: i64, a: i64, b: i64 }`; `sum`, used in one block, is a local of the machine) —, its body `loop { match at { … } }`, cut into
 blocks only where a statement holds a stop: a stop ends a block (its step returned, the rest a frame), an `if`,
 `while`, `for` or `loop` holding one becomes jumps between blocks (`break`, `continue` and `return` inside too), a
-statement holding none is copied as it is. Its steps: `enum Pick { Done { v: i64 }, Among { n: i64, k: Pick_among } }`;
+statement holding none is copied as it is. A block jumped to from one place only is written there: the machine
+goes through `match at` only where it is resumed or a loop goes round (a generator's step: one). Its steps:
+`enum Pick { Done { v: i64 }, Among { n: i64, k: Pick_among } }`;
 the first `pick(cx, base)`, the others `resume(cx, k, v)` by the operation's rest type, `v` of its type — no cast. A
 handler is plain code over the steps: `all` resumes a rest once for each alternative, `first` once, a generator's
 consumer pulls (`examples/loops.okg`). A step is flat: written out as bytes (`to_bytes`), it is resumed from them
@@ -109,7 +111,8 @@ handler count_paths for Choose -> i64 {
 One function for the steps of ANY resumable fn with those effects (`all(cx, pair(cx), out)`): a loop over the steps,
 a clause for each. `resume(k, x)` last in a clause goes on in the loop — no stack: a generator of a million values
 is summed in constant stack —; anywhere else it runs the handler on the rest, a deep handler, its value the
-handler's for that rest (`count_paths`). Checked: a clause for every once/many operation, each naming its
+handler's for that rest (`count_paths`) — a rest that is a value at once (a choice's leaf) given to the return clause
+right there, in the clause's loop, with no call. Checked: a clause for every once/many operation, each naming its
 arguments and the rest; no clause for a tail operation (the context answers those); a ONCE effect's rest resumed at
 most once — one `resume`, not in a loop, `k` used by it alone. `examples/handlers.okg`.
 

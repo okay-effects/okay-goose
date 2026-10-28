@@ -812,7 +812,9 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                 }
                 if lowered && user_loops.len == 0 && loops.len >= 2 && (is_word(t, "break") || is_word(t, "continue")) {
                     let target = if is_word(t, "break") { loops[loops.len - 2] } else { loops[loops.len - 1] };
-                    format(body, "{ at = ", target, "; continue; }");
+                    format(body, "{ ");
+                    goto(target);
+                    format(body, " }");
                     t = next(t + 1);       // the `;`
                     t++;
                     continue;
@@ -844,9 +846,15 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             buf.append(s[1..]);
         }
 
-        fn jump(l: i64) { format(body, " at = ", l, "; continue; },\n            "); }
+        // a jump to a block, a block's end, a block's start: marks in the body, written out at the end — a block
+        // jumped to from one place only written there (no dispatch through `at`), the others `at = l; continue;`
+        fn goto(l: i64) { body.push(5); format(body, l); body.push(6); }
+        fn end_block() { body.push(7); }
+        fn jump(l: i64) { goto(l); end_block(); }
         fn open(l: i64) {
-            format(body, l, " => {");
+            body.push(8);
+            format(body, l);
+            body.push(6);
             cur_block = l;
             while loopy.len <= l { loopy.push(0); }
             loopy[l] = if loops.len > 0 { 1 } else { 0 };
@@ -879,7 +887,8 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             };
             format(body, "k: ", pname, "_", text(op.name), " { k: ");
             frame_mark(l);
-            format(body, " } }; },\n            ");
+            format(body, " } };");
+            end_block();
             open(l);              // a block of its own: what lives across the stop is kept by the frame
         }
 
@@ -906,7 +915,9 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             format(body, " match ", sname, " { Done okay_d => {");
             mark(sname);
             if bind >= 0 { format(body, " "); vname(bind, body); use_var(bind); format(body, " = okay_d.v;"); }
-            format(body, " at = ", ln, "; continue; },");
+            format(body, " ");
+            goto(ln);
+            format(body, " },");
             for o in ops.len {
                 if effs[ops[o].effect].kind == TAIL || !set_has(c.set, ops[o].effect) { continue; }
                 let op = ops[o];
@@ -936,7 +947,8 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                 frame_mark(lr);
                 format(body, " } }; },");
             }
-            format(body, " }; },\n            ");
+            format(body, " };");
+            end_block();
             // the resumptions: the value given to the callee's rest, its step looked at again
             for o in ops.len {
                 if effs[ops[o].effect].kind == TAIL || !set_has(c.set, ops[o].effect) { continue; }
@@ -1071,7 +1083,12 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                     extract(next(j + 1), ob - 1);
                     format(body, " if (");
                     copy_tokens(next(j + 1), ob - 1, false);
-                    format(body, ") { at = ", la, "; } else { at = ", lb, "; } continue; },\n            ");
+                    format(body, ") { ");
+                    goto(la);
+                    format(body, " } else { ");
+                    goto(lb);
+                    format(body, " }");
+                    end_block();
                     open(la);
                     lower(next(ob + 1), cb - 1);
                     jump(lj);
@@ -1095,7 +1112,12 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                         extract(next(j + 1), ob - 1);
                         format(body, " if (");
                         copy_tokens(next(j + 1), ob - 1, false);
-                        format(body, ") { at = ", lb, "; } else { at = ", lx, "; } continue; },\n            ");
+                        format(body, ") { ");
+                        goto(lb);
+                        format(body, " } else { ");
+                        goto(lx);
+                        format(body, " }");
+                        end_block();
                     } else {
                         jump(lb);
                     }
@@ -1138,8 +1160,12 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                     open(lh);
                     mark(tok_text(name_i));
                     mark(endname);
-                    format(body, " if ", tok_text(name_i), " < ", endname, " { at = ", lb, "; } else { at = ", lx,
-                        "; } continue; },\n            ");
+                    format(body, " if ", tok_text(name_i), " < ", endname, " { ");
+                    goto(lb);
+                    format(body, " } else { ");
+                    goto(lx);
+                    format(body, " }");
+                    end_block();
                     open(lb);
                     loops.push(lx);
                     loops.push(lc);
@@ -1194,10 +1220,11 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
         let n_params = vars.len;
 
         // the body, from block 0
-        format(body, "0 => {");
+        open(0);
         lower(next(d.open + 1), d.close - 1);
-        if has_ret { format(body, " abort(\"okay: resumable fn ", n, " ended without a value\"); },\n"); }
-        else { format(body, " return ", pname, ".Done {}; },\n"); }
+        if has_ret { format(body, " abort(\"okay: resumable fn ", n, " ended without a value\");"); }
+        else { format(body, " return ", pname, ".Done {};"); }
+        end_block();
 
         // a variable's name and type as written (the loops' made-up ones, i64)
         // kept by the frame: a parameter, a variable a stop binds, one used in two blocks or in a block entered again
@@ -1250,24 +1277,61 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             format(mout, ";");
         }
         format(mout, "\n    loop {\n        match at {\n            ");
-        var b = 0;
-        while b < body.len {
-            if body[b] == 1 {
-                var l = 0;
+        // the blocks: each one's text in the body (by label), how many jumps go to it, whether a frame resumes it
+        var bfrom: i64[>..] = [];
+        var bto: i64[>..] = [];
+        var refs: i64[>..] = [];
+        var entry: bool[>..] = [];
+        for l in labels { bfrom.push(-1); bto.push(-1); refs.push(0); entry.push(l == 0); }
+        for l in stop_at { entry[l] = true; }
+        fn num(at: i64) -> i64 {
+            var l = 0;
+            var b = at;
+            while body[b] != 6 { l = l * 10 + (body[b] - '0'); b++; }
+            return l;
+        }
+        var cur = 0;
+        for b in body.len {
+            if body[b] == 8 { cur = num(b + 1); bfrom[cur] = -1; }
+            if body[b] == 6 && bfrom[cur] < 0 { bfrom[cur] = b + 1; }
+            if body[b] == 7 { bto[cur] = b; }
+            if body[b] == 5 { refs[num(b + 1)] += 1; }
+        }
+        // a block jumped to from one place, not resumed: written there, not dispatched through `at`
+        fn inlined(l: i64) -> bool { !entry[l] && refs[l] == 1 }
+        recursive fn render(from: i64, to: i64) {
+            var b = from;
+            while b < to {
+                if body[b] == 1 {
+                    var l = 0;
+                    b++;
+                    while body[b] != 2 { l = l * 10 + (body[b] - '0'); b++; }
+                    frame(l);
+                } else if body[b] == 3 {
+                    var l = 0;
+                    b++;
+                    while body[b] != 4 { l = l * 10 + (body[b] - '0'); b++; }
+                    seg_start.push(mout.len);          // the newline's own position: the line after it is l
+                    seg_line.push(l);
+                    mout.append("\n                ");
+                } else if body[b] == 5 {
+                    let l = num(b + 1);
+                    while body[b] != 6 { b++; }
+                    if inlined(l) { render(bfrom[l], bto[l]); } else { format(mout, " at = ", l, "; continue;"); }
+                } else {
+                    mout.push(body[b]);
+                }
                 b++;
-                while body[b] != 2 { l = l * 10 + (body[b] - '0'); b++; }
-                frame(l);
-            } else if body[b] == 3 {
-                var l = 0;
-                b++;
-                while body[b] != 4 { l = l * 10 + (body[b] - '0'); b++; }
-                seg_start.push(mout.len);          // the newline's own position: the line after it is l
-                seg_line.push(l);
-                mout.append("\n                ");
-            } else {
-                mout.push(body[b]);
             }
-            b++;
+        }
+        // the arms: the blocks resumed or jumped to from several places (one jumped to from none never runs)
+        for b in body.len {
+            if body[b] != 8 { continue; }
+            let l = num(b + 1);
+            if !entry[l] && refs[l] < 2 { continue; }
+            format(mout, l, " => {");
+            render(bfrom[l], bto[l]);
+            format(mout, " },\n            ");
         }
         // after the blocks, the declaration's line again
         seg_start.push(mout.len);
