@@ -1335,6 +1335,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
     fn write_handler(h: HDecl) {
         let hn = text(h.name);
         let has_ret = h.ret.len > 0;
+        var ret_clause = -1;     // the return clause, if a rest is resumed not last in a clause (-1: none)
         var pnames: u8[>..] = [];
         each_param(h.params) { pn, ty => format(pnames, ", ", pn); };
         // a clause's body: `resume(k, …)` rewritten; `tail_from`: the tail resume's token (-1: none)
@@ -1346,6 +1347,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
                     let rp = closing(lp, '(', ')');
                     let a = next(lp + 1);
                     if t == tail_at { format(mout, "step = resume(cx, "); }
+                    else if ret_clause >= 0 { format(mout, "okay_rest_", hn, "(cx, resume(cx, "); }
                     else { format(mout, hn, "(cx, resume(cx, "); }
                     copy_plain(a, rp - 1);
                     if t == tail_at { format(mout, "); continue;"); }
@@ -1386,9 +1388,44 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             if tail >= 0 { return; }
             if has_ret { format(mout, " } "); } else { format(mout, " } return;"); }
         }
+        var deep = false;
+        for q in h.first..h.first + h.n {
+            let c = clauses[q];
+            if c.op < 0 { ret_clause = q; continue; }
+            var resumes = 0;
+            for t in c.open..c.close { if is_word(t, "resume") && is_punct(next(t + 1), '(') { resumes++; } }
+            if resumes > (if tail_resume(c) >= 0 { 1 } else { 0 }) { deep = true; }
+        }
+        if !deep { ret_clause = -1; }
+        fn cap_name(s: u8[:]) {
+            if s[0] >= 'a' && s[0] <= 'z' { mout.push(s[0] - 32); } else { mout.push(s[0]); }
+            mout.append(s[1..]);
+        }
+        // the Done arm: the return clause's body
+        fn done_arm(c: Clause) {
+            format(mout, "            Done okay_d => {");
+            if c.n_names > 0 { format(mout, " let ", text(cnames[c.first_name]), " = okay_d.v;"); }
+            if has_ret { format(mout, " return {"); } else { format(mout, " {"); }
+            copy_body(next(c.open + 1), c.close - 1, "", -1);
+            clause_end(c, -1);
+            format(mout, " },\n");
+        }
         seg_start.push(mout.len);
         seg_line.push(line_of(toks[h.from].at));
         format(mout, "\n// handler ", hn, " (", path, ":", line_of(toks[h.from].at), ")\n");
+        // a rest resumed not last in a clause: its step looked at here — a value at once (a choice's leaf) the
+        // return clause's in the clause's loop, no call; an operation the handler run on the rest
+        if ret_clause >= 0 {
+            format(mout, "fn okay_rest_", hn, "<OkayCx, OkayStep>(cx: OkayCx&, step: OkayStep");
+            if h.params.len > 0 { format(mout, ", ", text(h.params)); }
+            format(mout, ")");
+            if has_ret { format(mout, " -> ", text(h.ret)); }
+            format(mout, " {\n        match step {\n");
+            done_arm(clauses[ret_clause]);
+            format(mout, "            _ => { ", if has_ret { "return " } else { "" });
+            format(mout, hn, "(cx, step", pnames, "); },\n");
+            format(mout, "        }\n}\n");
+        }
         format(mout, "recursive fn ", hn, "<OkayCx, OkayStep>(cx: OkayCx&, start: OkayStep");
         if h.params.len > 0 { format(mout, ", ", text(h.params)); }
         format(mout, ")");
@@ -1396,23 +1433,18 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
         format(mout, " {\n    var step = start;\n    loop {\n        match step {\n");
         for q in h.first..h.first + h.n {
             let c = clauses[q];
+            if c.op < 0 { done_arm(c); continue; }
             let tail = tail_resume(c);
-            if c.op < 0 {
-                format(mout, "            Done okay_d => {");
-                if c.n_names > 0 { format(mout, " let ", text(cnames[c.first_name]), " = okay_d.v;"); }
-            } else {
-                let op = ops[c.op];
-                format(mout, "            ");
-                if text(op.name)[0] >= 'a' && text(op.name)[0] <= 'z' { mout.push(text(op.name)[0] - 32); } else { mout.push(text(op.name)[0]); }
-                mout.append(text(op.name)[1..]);
-                format(mout, " okay_o => {");
-                var i = 0;
-                each_param(op.params) { pn, ty =>
-                    if i < c.n_names { format(mout, " let ", text(cnames[c.first_name + i]), " = okay_o.", pn, ";"); }
-                    i++;
-                };
-                if c.n_names > 0 { format(mout, " let ", text(cnames[c.first_name + c.n_names - 1]), " = okay_o.k;"); }
-            }
+            let op = ops[c.op];
+            format(mout, "            ");
+            cap_name(text(op.name));
+            format(mout, " okay_o => {");
+            var i = 0;
+            each_param(op.params) { pn, ty =>
+                if i < c.n_names { format(mout, " let ", text(cnames[c.first_name + i]), " = okay_o.", pn, ";"); }
+                i++;
+            };
+            if c.n_names > 0 { format(mout, " let ", text(cnames[c.first_name + c.n_names - 1]), " = okay_o.k;"); }
             if tail < 0 { if has_ret { format(mout, " return {"); } else { format(mout, " {"); } }
             let kname = if c.n_names > 0 { text(cnames[c.first_name + c.n_names - 1]) } else { "" };
             copy_body(next(c.open + 1), c.close - 1, kname, tail);
