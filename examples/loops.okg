@@ -30,6 +30,13 @@ resumable fn search(target: i64) -> i64 ! Guess + Log {
     return -1;
 }
 
+// a variable set before a stop and read after it: the frame keeps it
+resumable fn pair(n: i64) ! Yield {
+    let x: i64 = n * 7;
+    emit(1);
+    emit(x);
+}
+
 struct Console { lines: i64 }
 fn log(cx: Console&, line: u8[:]) { cx.lines += 1; }
 
@@ -45,6 +52,15 @@ fn main() {
         }
     }
     print("squares: ", out, ", logged ", c.lines);
+    var two: i64[>..] = [];
+    var p = pair(c, 6);
+    loop {
+        match p {
+            Done => { break; },
+            Emit e => { two.push(e.v); p = resume(c, e.k); },
+        }
+    }
+    print("pair: ", two);
 
     // guesses fed in turn: a miss, a negative one skipped, then the target
     let feed: i64[5] = [4, -1, 9, 7, 2];

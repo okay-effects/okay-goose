@@ -844,6 +844,14 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             buf.append(s[1..]);
         }
 
+        fn jump(l: i64) { format(body, " at = ", l, "; continue; },\n            "); }
+        fn open(l: i64) {
+            format(body, l, " => {");
+            cur_block = l;
+            while loopy.len <= l { loopy.push(0); }
+            loopy[l] = if loops.len > 0 { 1 } else { 0 };
+        }
+
         // a stop: the step returned — the operation's arguments by its parameters' names, the rest a frame at a
         // new label — and that label's block opened, where resume comes back
         fn write_stop(o: i64, bind: i64, lp: i64, rp: i64) {
@@ -871,14 +879,8 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:], lines: i64[>..]
             };
             format(body, "k: ", pname, "_", text(op.name), " { k: ");
             frame_mark(l);
-            format(body, " } }; },\n            ", l, " => {");
-        }
-        fn jump(l: i64) { format(body, " at = ", l, "; continue; },\n            "); }
-        fn open(l: i64) {
-            format(body, l, " => {");
-            cur_block = l;
-            while loopy.len <= l { loopy.push(0); }
-            loopy[l] = if loops.len > 0 { 1 } else { 0 };
+            format(body, " } }; },\n            ");
+            open(l);              // a block of its own: what lives across the stop is kept by the frame
         }
 
         // a resumable fn called: run, its step looked at — its value bound and on, or its operation passed out as this
