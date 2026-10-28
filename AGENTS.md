@@ -1,7 +1,7 @@
 # okay-goose — notes for agents
 
 - okay's effects for Goose (https://github.com/aardappel/goose, cloned and built at ../goose; compiler
-  ../goose/build/goose). Local repository, not published.
+  ../goose/build/goose). Public: github.com/okay-effects/okay-goose.
 - The design and what works: README.md. The front end `src/okgc.goose` is written in Goose itself (the user's
   rule): tables are locals of `compile`, the passes nested functions over them (Goose's "several tables, one
   context" idiom); no recursion needed so far.

@@ -2,7 +2,7 @@
 
 [okay](https://github.com/okay-effects/okay)'s algebraic effects for [Goose](https://aardappel.github.io/goose/), a
 memory-safe systems language that compiles to C: no heap, no GC, function values only at compile time, whole-program
-monomorphization. Local, not published.
+monomorphization. https://github.com/okay-effects/okay-goose
 
 ## How effects map onto Goose
 
