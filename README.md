@@ -74,7 +74,12 @@ the first `pick(cx, base)`, the others `resume(cx, k, v)` by the operation's res
 handler is plain code over the steps: `all` resumes a rest once for each alternative, `first` once, a generator's
 consumer pulls (`examples/loops.okg`). A step is flat: written out as bytes (`to_bytes`), it is resumed from them
 later or elsewhere (`examples/choose.okg`). A variable of a machine fn has a type (op-bound ones take the
-operation's), one name each. Not yet: a stop inside an expression or a `match`, a machine fn calling a machine fn.
+operation's), one name each.
+
+A machine fn calls a machine fn as a statement (`let x = range(0, 3);`): the callee's steps pass out as the
+caller's — its rest kept in the caller's frame, a field —, its value bound when it is done; resumed, the value goes
+to the callee (`examples/nested.okg`: a generator delegating to another, a choice made in a callee). Not yet: a stop
+inside an expression or a `match`.
 
 ## Layout
 
@@ -82,6 +87,7 @@ operation's), one name each. Not yet: a stop inside an expression or a `match`, 
 - `examples/shop.okg` — the shop: effects, sets, `A ! F + G`, an interceptor with forwarding
 - `examples/choose.okg` — a machine fn: all paths, the first, a step saved as bytes and resumed
 - `examples/loops.okg` — a generator pulled value by value; a search whose `while` stops at each guess
+- `examples/nested.okg` — machine fns calling machine fns: a generator delegating, a choice in a callee
 - `proto/01_context.goose` — effects as overloads on a context, an interceptor, an aborting handler
 - `proto/02_machine.goose` — a machine: defunctionalized frames, `among` taking `k`, the `all` handler resuming it
   for each alternative; `k` as bytes and back
@@ -94,7 +100,7 @@ tests/run.sh
 
 ## Next
 
-- machine fns: a machine fn calling a machine fn (a stack of frames), stops inside expressions and `match`
+- machine fns: stops inside expressions and `match`; a recursive machine fn (a frame of itself needs a pool)
 - `abort` effects generated as `return … from`; handlers declared (`handler all for Choose { … }`) and written out
 - sensitive effects (needs okgc's own modules and privacy: Goose has none)
 - okgc rewritten in its own dialect, its diagnostics and tables as effects

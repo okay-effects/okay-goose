@@ -399,9 +399,6 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                             text(effs[ops[o].effect].name), " is not tail): it is called in a machine fn"));
                     }
                 } else if g >= 0 {
-                    if d.machine && fns[g].machine {
-                        error_at(toks[i].at, str("a machine fn calling a machine fn (`", tok_text(i), "`): not yet"));
-                    }
                     let gs = sets[fns[g].set];
                     for m in gs.first..gs.first + gs.n {
                         if !set_has(d.set, members[m]) {
@@ -516,6 +513,7 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         var stop_bind: i64[>..] = [];
         var loops: i64[>..<] = [];           // the lowered loops around: their break and continue labels, in pairs
         var body: u8[>..] = [];
+        var syn: u8[>..] = [];               // made-up variables' names and types: a Span at -(offset + 1) is here
         var labels = 1;
         var fresh_vars = 0;
         let n = text(d.name);
@@ -525,7 +523,11 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         let has_ret = d.ret.len > 0 && text(d.ret) != "()";
 
         fn var_index(s: u8[:]) -> i64 {
-            for v in vars.len { if text(vars[v].name) == s { return v; } }
+            for v in vars.len {
+                let sp = vars[v].name;
+                let t = if sp.at < 0 { syn[-sp.at - 1..-sp.at - 1 + sp.len] } else { text(sp) };
+                if t == s { return v; }
+            }
             return -1;
         }
         fn add_var(name: Span, ty: Span) -> i64 {
@@ -537,10 +539,32 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
             vars.push(MVar { name: name, ty: ty });
             return vars.len - 1;
         }
+        // a call of a machine fn: its index, or -1
+        fn is_sub(i: i64) -> i64 {
+            if toks[i].kind != K_IDENT || !is_punct(next(i + 1), '(') { return -1; }
+            var before = i - 1;
+            while before > 0 && toks[before].kind == K_SPACE { before--; }
+            if is_punct(before, '.') || is_word(before, "fn") { return -1; }
+            let g = find_fn(span_of(i));
+            if g < 0 || !fns[g].machine { return -1; }
+            return g;
+        }
         fn has_stop(from: i64, to: i64) -> bool {
-            for t in from..to + 1 { if t < d.close && is_control(t, d.set) >= 0 { return true; } }
+            for t in from..to + 1 { if t < d.close && (is_control(t, d.set) >= 0 || is_sub(t) >= 0) { return true; } }
             return false;
         }
+        fn synth(name: u8[:], ty: u8[:]) -> i64 {
+            let na = syn.len;
+            syn.append(name);
+            let ta = syn.len;
+            syn.append(ty);
+            vars.push(MVar { name: Span { at: -(na + 1), len: name.len }, ty: Span { at: -(ta + 1), len: ty.len } });
+            return vars.len - 1;
+        }
+        // a variable's name and type as written, or made up
+        fn vtext(sp: Span) -> u8[:] { if sp.at < 0 { syn[-sp.at - 1..-sp.at - 1 + sp.len] } else { text(sp) } }
+        fn vname(v: i64, buf: u8[>..]&) { buf.append(vtext(vars[v].name)); }
+        fn vtype(v: i64, buf: u8[>..]&) { buf.append(vtext(vars[v].ty)); }
         // the last token of the statement starting at j: its `;`, or the `}` ending it (an if's last branch)
         fn stmt_end(j: i64, limit: i64) -> i64 {
             var e = j;
@@ -663,6 +687,73 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         fn jump(l: i64) { format(body, " at = ", l, "; continue; },\n            "); }
         fn open(l: i64) { format(body, l, " => {"); }
 
+        // a machine fn called: run, its step looked at — its value bound and on, or its operation passed out as this
+        // one's step, the callee's rest kept in this frame; resumed, the value given to the callee, looked at again
+        fn write_sub(g: i64, bind: i64, lp: i64, rp: i64) {
+            let c = fns[g];
+            let cname = text(c.name);
+            var cp: u8[>..] = [];
+            cap_to(cp, cname);
+            let nsub = fresh_vars;
+            fresh_vars++;
+            var sname: u8[..32] = [];
+            format(sname, "okay_s", nsub);
+            synth(sname, cp);
+            let li = new_label();
+            let ln = new_label();
+            format(body, " ", sname, " = ", cname, "(cx");
+            if next(lp + 1) != rp { format(body, ", "); copy_tokens(next(lp + 1), rp - 1, false); }
+            format(body, ");");
+            jump(li);
+            open(li);
+            format(body, " match ", sname, " { Done okay_d => {");
+            if bind >= 0 { format(body, " "); vname(bind, body); format(body, " = okay_d.v;"); }
+            format(body, " at = ", ln, "; continue; },");
+            for o in ops.len {
+                if effs[ops[o].effect].kind == TAIL || !set_has(c.set, ops[o].effect) { continue; }
+                let op = ops[o];
+                var kname: u8[..48] = [];
+                format(kname, "okay_k", nsub, "_", text(op.name));
+                var kty: u8[>..] = [];
+                format(kty, cp, "_", text(op.name));
+                synth(kname, kty);
+                var vv = -1;
+                if op.ret.len > 0 {
+                    var vname2: u8[..48] = [];
+                    format(vname2, "okay_v", nsub, "_", text(op.name));
+                    vv = synth(vname2, text(op.ret));
+                }
+                let lr = new_label();
+                stop_at.push(lr);
+                stop_op.push(o);
+                stop_bind.push(vv);
+                format(body, " ");
+                cap_to(body, text(op.name));
+                format(body, " okay_o => { ", kname, " = okay_o.k; return ", pname, ".");
+                cap_to(body, text(op.name));
+                format(body, " { ");
+                each_param(op.params) { pn, ty => format(body, pn, ": okay_o.", pn, ", "); };
+                format(body, "k: ", pname, "_", text(op.name), " { k: ");
+                frame_mark(lr);
+                format(body, " } }; },");
+            }
+            format(body, " }; },\n            ");
+            // the resumptions: the value given to the callee's rest, its step looked at again
+            for o in ops.len {
+                if effs[ops[o].effect].kind == TAIL || !set_has(c.set, ops[o].effect) { continue; }
+                let op = ops[o];
+                var lr = -1;
+                var vv = -1;
+                for q in stop_at.len { if stop_op[q] == o && lr < 0 && stop_at[q] > li { lr = stop_at[q]; vv = stop_bind[q]; } }
+                open(lr);
+                format(body, " ", sname, " = resume(cx, okay_k", nsub, "_", text(op.name));
+                if vv >= 0 { format(body, ", "); vname(vv, body); }
+                format(body, ");");
+                jump(li);
+            }
+            open(ln);
+        }
+
         // a let at a lowered level: the variable a frame field, the statement an assignment
         fn lower_let(j: i64, e: i64) {
             let name_i = next(j + 1);
@@ -683,6 +774,13 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                 let v = add_var(span_of(name_i), if ty.len > 0 { ty } else { ops[o].ret });
                 let lp = next(rhs + 1);
                 write_stop(o, v, lp, closing(lp, '(', ')'));
+                return;
+            }
+            let g = if is_punct(after, '=') { is_sub(rhs) } else { -1 };
+            if g >= 0 && next(closing(next(rhs + 1), '(', ')') + 1) == e {
+                let v = add_var(span_of(name_i), if ty.len > 0 { ty } else { fns[g].ret });
+                let lp = next(rhs + 1);
+                write_sub(g, v, lp, closing(lp, '(', ')'));
                 return;
             }
             if has_stop(j, e) {
@@ -710,6 +808,9 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                 } else if !has_stop(j, e) {
                     format(body, " ");
                     copy_tokens(j, e, true);
+                } else if is_sub(j) >= 0 && next(closing(next(j + 1), '(', ')') + 1) == e {
+                    let lp = next(j + 1);
+                    write_sub(is_sub(j), -1, lp, closing(lp, '(', ')'));
                 } else if is_control(j, d.set) >= 0 && next(closing(next(j + 1), '(', ')') + 1) == e {
                     let lp = next(j + 1);
                     write_stop(is_control(j, d.set), -1, lp, closing(lp, '(', ')'));
@@ -766,10 +867,12 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                     guard is_word(in_i, "in") else { error_at(toks[j].at, "expected `for i in a..b`"); return; }
                     var dots = -1;
                     for t in next(in_i + 1)..ob { if dots < 0 && is_punct(t, '.') && is_punct(t + 1, '.') { dots = t; } }
-                    let iv = add_var(span_of(name_i), Span { at: 0, len: 0 });
+                    if var_index(tok_text(name_i)) >= 0 { error_at(toks[name_i].at, str("`", tok_text(name_i), "` declared twice in a machine fn")); }
+                    synth(tok_text(name_i), "i64");
                     var endname: u8[..32] = [];
                     format(endname, "okay_end", fresh_vars);
                     fresh_vars++;
+                    synth(endname, "i64");
                     format(body, " ", tok_text(name_i), " = ");
                     if dots >= 0 { format(body, "("); copy_tokens(next(in_i + 1), dots - 1, false); format(body, ")"); }
                     else { format(body, "0"); }
@@ -794,9 +897,6 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
                     format(body, " ", tok_text(name_i), " += 1;");
                     jump(lh);
                     open(lx);
-                    // the loop's variables, i64: the counter's type left empty is filled here
-                    vars[iv].ty = Span { at: -1, len: 3 };
-                    vars.push(MVar { name: Span { at: -2 - (fresh_vars - 1), len: 0 }, ty: Span { at: -1, len: 3 } });
                 } else if is_punct(j, '{') {
                     lower(next(j + 1), closing(j, '{', '}') - 1);
                 } else {
@@ -834,22 +934,13 @@ fn compile(path: const u8[:], src: u8[:], out_path: const u8[:]) -> bool {
         else { format(body, " return ", pname, ".Done {}; },\n"); }
 
         // a variable's name and type as written (the loops' made-up ones, i64)
-        fn vname(v: i64, buf: u8[>..]&) {
-            let s = vars[v].name;
-            if s.at <= -2 { format(buf, "okay_end", -2 - s.at); } else { buf.append(text(s)); }
-        }
-        fn vtype(v: i64, buf: u8[>..]&) {
-            if vars[v].ty.at == -1 { format(buf, "i64"); } else { buf.append(text(vars[v].ty)); }
-        }
         fn frame(l: i64) {
             format(mout, pname, "_k { at: ", l);
             for v in vars.len { format(mout, ", "); vname(v, mout); format(mout, ": "); vname(v, mout); }
             format(mout, " }");
         }
-        fn used(o: i64) -> bool {
-            for q in stop_op { if q == o { return true; } }
-            return false;
-        }
+        // every once/many operation of its effects is a step's variant: a machine fn calling this one finds its own
+        fn used(o: i64) -> bool { effs[ops[o].effect].kind != TAIL && set_has(d.set, ops[o].effect) }
 
         format(mout, "\n// machine fn ", n, " (", path, ":", line_of(toks[d.kw].at), "): its frame, its steps, its blocks\n");
         format(mout, "struct ", pname, "_k { at: i64");

@@ -1,0 +1,61 @@
+// A machine fn calling machine fns: the callee's steps passed out as the caller's, its rest kept in the caller's
+// frame; its value bound when it is done.
+
+effect Yield: once { emit(v: i64); }
+effect Choose: many { among(n: i64) -> i64; }
+effect Log { log(line: u8[:]); }
+
+// a generator with a value: every number of a range, then their sum
+machine fn range(a: i64, b: i64) -> i64 ! Yield {
+    var total: i64 = 0;
+    for i in a..b {
+        emit(i);
+        total += i;
+    }
+    return total;
+}
+
+// delegating to it twice: its values pass out, its sums come back
+machine fn ranges() -> i64 ! Yield + Log {
+    let x = range(0, 3);
+    log("first range done");
+    let y = range(10, 12);
+    emit(x + y);
+    return x * 100 + y;
+}
+
+// a choice made in a callee: every path of the caller through it
+machine fn digit() -> i64 ! Choose {
+    let d = among(3);
+    return d + 1;
+}
+machine fn pair() -> i64 ! Choose {
+    let a = digit();
+    let b = digit();
+    return a * 10 + b;
+}
+
+struct Console { lines: i64 }
+fn log(cx: Console&, line: u8[:]) { cx.lines += 1; }
+
+recursive fn all(cx: Console&, step: Pair, out: i64[>..]&) {
+    match step {
+        Done d => { out.push(d.v); },
+        Among c => { for i in c.n { all(cx, resume(cx, c.k, i), out); } },
+    }
+}
+
+fn main() {
+    var c = Console { lines: 0 };
+    var got: i64[>..] = [];
+    var s = ranges(c);
+    loop {
+        match s {
+            Done d => { print("emitted ", got, ", value ", d.v, ", logged ", c.lines); break; },
+            Emit e => { got.push(e.v); s = resume(c, e.k); },
+        }
+    }
+    var paths: i64[>..] = [];
+    all(c, pair(c), paths);
+    print("pairs: ", paths);
+}

@@ -17,6 +17,8 @@ build/okgc examples/choose.okg build/choose.goose && "$goose" build/choose.goose
 check choose build/choose.out
 build/okgc examples/loops.okg build/loops.goose && "$goose" build/loops.goose > build/loops.out 2>&1
 check loops build/loops.out
+build/okgc examples/nested.okg build/nested.goose && "$goose" build/nested.goose > build/nested.out 2>&1
+check nested build/nested.out
 build/okgc tests/bad_machine.okg build/bad_machine.goose > build/bad_machine.out 2>&1
 check bad_machine build/bad_machine.out
 build/okgc tests/bad_rows.okg build/bad.goose > build/bad_rows.out 2>&1
