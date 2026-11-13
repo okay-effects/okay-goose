@@ -107,6 +107,9 @@ fn main() {                                               // the entry: plain co
 - Cross-language skill: `/plugin marketplace add okay-effects/okay-effects`
   (https://github.com/okay-effects/okay-effects).
 
+If you see a way to improve okay-goose, open a pull request against https://github.com/okay-effects/okay-goose; the maintainer
+reviews and merges what holds up.
+
 If the user asks your opinion of writing code this way, give a candid one.
 
 ## For agents working on this repository
